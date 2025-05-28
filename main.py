@@ -330,48 +330,51 @@ def render_video(data: RenderRequest):
         except Exception as e:
             logger.warning(f"Skipping title due to error: {str(e)}")
         
-        # Add improved subtitles in the lower third (Crayo.ai style)
+        # Add improved subtitles in the middle area (Crayo.ai style)
         try:
             body_text = data.body[:800] + "..." if len(data.body) > 800 else data.body
             words = body_text.split()
             
-            # Create subtitle chunks (3-5 words per line for Crayo.ai style)
-            chunk_size = 4  # Even smaller chunks for TikTok style
+            # Create subtitle chunks (2-3 words per line for better Crayo.ai style)
+            chunk_size = 3  # Smaller chunks for better readability and timing
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-            chunks = chunks[:20]  # Allow more chunks for longer stories
+            chunks = chunks[:25]  # Allow more chunks for better timing
             
-            chunk_duration = audio_duration / len(chunks) if chunks else audio_duration
+            # Better timing calculation - account for natural speech pauses
+            total_subtitle_time = audio_duration * 0.9  # Use 90% of audio time for subtitles
+            chunk_duration = total_subtitle_time / len(chunks) if chunks else audio_duration
             
-            # Position subtitles in the lower third of the screen (Crayo.ai style)
-            subtitle_y_position = int(target_height * 0.7)  # 70% down from top (lower third)
+            # Position subtitles in the middle area (like Crayo.ai - higher than lower third)
+            subtitle_y_position = int(target_height * 0.55)  # 55% down from top (middle area)
             
             for i, chunk in enumerate(chunks):
-                start_time = i * chunk_duration
+                # Add slight delay at start and better spacing
+                start_time = (i * chunk_duration) + 0.5  # Small delay to sync better
                 
                 # Create clean text without background (Crayo.ai style)
                 subtitle_text = TextClip(
                     chunk,
-                    fontsize=38,  # Larger, bold text
+                    fontsize=48,  # Much larger text like Crayo.ai
                     color='white',
                     font='Arial-Bold',
                     stroke_color='black',
-                    stroke_width=3,  # Thick outline for readability
+                    stroke_width=4,  # Thicker outline for better readability
                     method='caption',
-                    size=(target_width-80, None),  # More margin from edges
+                    size=(target_width-60, None),  # Less margin for bigger text
                     align='center'
                 )
                 
-                # Position in lower third with some variation to avoid overlap
-                y_offset = (i % 3) * 15  # Slight vertical variation for consecutive subtitles
+                # Position in middle area with minimal variation
+                y_offset = (i % 2) * 10  # Very slight vertical variation
                 final_y_position = subtitle_y_position + y_offset
                 
                 # Make sure we don't go off screen
-                if final_y_position + 60 > target_height:
+                if final_y_position + 80 > target_height:
                     final_y_position = subtitle_y_position
                 
                 subtitle_final = subtitle_text.set_position(
                     ('center', final_y_position)
-                ).set_start(start_time).set_duration(chunk_duration)
+                ).set_start(start_time).set_duration(chunk_duration * 1.2)  # Slightly longer duration for overlap
                 
                 clips.append(subtitle_final)
                 
@@ -383,15 +386,15 @@ def render_video(data: RenderRequest):
                 body_text = data.body[:400] + "..." if len(data.body) > 400 else data.body
                 simple_subtitle = TextClip(
                     body_text,
-                    fontsize=32,
+                    fontsize=42,  # Larger fallback text
                     color='white',
                     font='Arial-Bold',
                     stroke_color='black',
-                    stroke_width=3,
+                    stroke_width=4,
                     method='caption',
                     size=(target_width-60, None),
                     align='center'
-                ).set_position(('center', int(target_height * 0.7))).set_duration(audio_duration)
+                ).set_position(('center', int(target_height * 0.55))).set_duration(audio_duration)
                 clips.append(simple_subtitle)
             except Exception as e2:
                 logger.warning(f"Even simple subtitles failed: {str(e2)}")
