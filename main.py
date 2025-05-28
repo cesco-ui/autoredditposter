@@ -5,7 +5,7 @@ import tempfile
 import os
 import uuid
 import random
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip
 import logging
 from typing import Optional
 
@@ -203,60 +203,124 @@ def render_video(data: RenderRequest):
         if not os.path.exists(background_path) or os.path.getsize(background_path) == 0:
             raise HTTPException(status_code=400, detail="Background video is empty or missing")
         
-        # Load video and audio
-        logger.info("Loading video and audio files")
-        background_video = VideoFileClip(background_path).subclip(0, 60)  # Limit to 60 seconds
-        audio_clip = VideoFileClip(audio_path).audio
+        # Load video and audio with better error handling
+        logger.info("Loading video and audio files...")
+        
+        try:
+            # Load background video with explicit FPS handling
+            logger.info(f"Loading background video: {background_path}")
+            background_video = VideoFileClip(background_path)
+            
+            # Ensure the video has a valid FPS
+            if not hasattr(background_video, 'fps') or background_video.fps is None:
+                logger.warning("Background video has no FPS info, setting to 24")
+                background_video = background_video.set_fps(24)
+            
+            # Limit to 60 seconds
+            background_video = background_video.subclip(0, min(60, background_video.duration))
+            
+            logger.info(f"Background video loaded: {background_video.duration}s, {background_video.fps}fps")
+            
+        except Exception as e:
+            logger.error(f"Error loading background video: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to load background video: {str(e)}")
+        
+        try:
+            # Load audio using AudioFileClip instead of VideoFileClip
+            logger.info(f"Loading audio: {audio_path}")
+            audio_clip = AudioFileClip(audio_path)
+            logger.info(f"Audio loaded: {audio_clip.duration}s")
+            
+        except Exception as e:
+            logger.error(f"Error loading audio: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to load audio: {str(e)}")
         
         # Get audio duration and limit to video duration
         audio_duration = min(audio_clip.duration, background_video.duration)
+        logger.info(f"Using duration: {audio_duration}s")
         
         # Trim background video to match audio duration
         if background_video.duration > audio_duration:
             background_video = background_video.subclip(0, audio_duration)
         
         # Create title overlay (hook)
-        title_clip = TextClip(
-            data.hook[:150] + "..." if len(data.hook) > 150 else data.hook,
-            fontsize=32,
-            color='white',
-            font='Arial-Bold',
-            stroke_color='black',
-            stroke_width=3,
-            method='caption',
-            size=(background_video.w - 40, None)
-        ).set_position(('center', 'top')).set_duration(min(10, audio_duration))
+        try:
+            logger.info("Creating title overlay...")
+            title_clip = TextClip(
+                data.hook[:150] + "..." if len(data.hook) > 150 else data.hook,
+                fontsize=32,
+                color='white',
+                font='Arial-Bold',
+                stroke_color='black',
+                stroke_width=3,
+                method='caption',
+                size=(background_video.w - 40, None)
+            ).set_position(('center', 'top')).set_duration(min(10, audio_duration))
+            
+        except Exception as e:
+            logger.error(f"Error creating title: {str(e)}")
+            title_clip = None  # Continue without title if it fails
         
         # Create subtitle clips from body text
-        body_text = data.body[:1000] + "..." if len(data.body) > 1000 else data.body
-        subtitle_clips = create_subtitle_clips(body_text, audio_duration, (background_video.w, background_video.h))
+        try:
+            logger.info("Creating subtitle clips...")
+            body_text = data.body[:1000] + "..." if len(data.body) > 1000 else data.body
+            subtitle_clips = create_subtitle_clips(body_text, audio_duration, (background_video.w, background_video.h))
+            
+        except Exception as e:
+            logger.error(f"Error creating subtitles: {str(e)}")
+            subtitle_clips = []  # Continue without subtitles if they fail
         
         # Compose final video
-        logger.info("Composing final video")
-        final_clips = [background_video, title_clip] + subtitle_clips
-        final_video = CompositeVideoClip(final_clips)
-        final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
+        logger.info("Composing final video...")
+        try:
+            final_clips = [background_video]
+            if title_clip:
+                final_clips.append(title_clip)
+            final_clips.extend(subtitle_clips)
+            
+            final_video = CompositeVideoClip(final_clips)
+            
+            # Ensure final video has FPS set
+            if not hasattr(final_video, 'fps') or final_video.fps is None:
+                final_video = final_video.set_fps(24)
+            
+            final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
+            
+        except Exception as e:
+            logger.error(f"Error composing video: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to compose video: {str(e)}")
         
         # Write video file
         logger.info(f"Writing video to {output_path}")
-        final_video.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
-            remove_temp=True,
-            fps=24,
-            preset='medium',
-            verbose=False,
-            logger=None
-        )
+        try:
+            final_video.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
+                remove_temp=True,
+                fps=24,  # Explicitly set FPS
+                preset='medium',
+                verbose=False,
+                logger=None
+            )
+            
+        except Exception as e:
+            logger.error(f"Error writing video: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to write video: {str(e)}")
         
         # Close clips to free memory
-        background_video.close()
-        audio_clip.close()
-        final_video.close()
-        for clip in subtitle_clips:
-            clip.close()
+        try:
+            background_video.close()
+            audio_clip.close()
+            final_video.close()
+            if title_clip:
+                title_clip.close()
+            for clip in subtitle_clips:
+                clip.close()
+        except Exception as e:
+            logger.warning(f"Error closing clips: {str(e)}")
         
         # Verify output file was created
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -279,8 +343,10 @@ def render_video(data: RenderRequest):
             "message": message
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in render_video: {str(e)}")
+        logger.error(f"Unexpected error in render_video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Video rendering failed: {str(e)}")
     
     finally:
