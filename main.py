@@ -169,45 +169,49 @@ def upload_to_dropbox(file_path: str, dropbox_path: str) -> bool:
 def write_video_robust(video_clip, output_path: str, temp_dir: str, video_id: str) -> bool:
     """Write video with multiple fallback methods"""
     
-    # Method 1: Try with conservative settings first
+    # Method 1: Ultra-conservative settings for maximum compatibility
     try:
-        logger.info("Attempting video write with conservative settings...")
+        logger.info("Attempting video write with ultra-conservative settings...")
         video_clip.write_videofile(
             output_path,
             codec='libx264',
             audio_codec='aac',
-            bitrate="1000k",  # Lower bitrate
+            bitrate="800k",  # Even lower bitrate
             fps=24,
-            preset='ultrafast',  # Fastest encoding
-            threads=1,  # Single thread to reduce resource usage
+            preset='ultrafast',
+            threads=1,  # Single thread
+            audio_bitrate="128k",  # Lower audio bitrate
             temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
             remove_temp=True,
             verbose=False,
-            logger=None
+            logger=None,
+            ffmpeg_params=['-movflags', '+faststart']  # Optimize for streaming
         )
-        logger.info("Video written successfully with conservative settings")
+        logger.info("Video written successfully with ultra-conservative settings")
         return True
         
     except Exception as e:
-        logger.warning(f"Conservative method failed: {str(e)}")
+        logger.warning(f"Ultra-conservative method failed: {str(e)}")
     
-    # Method 2: Try without audio encoding
+    # Method 2: Minimal settings fallback
     try:
-        logger.info("Attempting video write without separate audio encoding...")
+        logger.info("Attempting video write with minimal settings...")
         video_clip.write_videofile(
             output_path,
             codec='libx264',
             fps=24,
-            preset='ultrafast',
+            preset='veryfast',
             threads=1,
             verbose=False,
-            logger=None
+            logger=None,
+            temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio_2.m4a"),
+            remove_temp=True
         )
-        logger.info("Video written successfully without separate audio encoding")
+        logger.info("Video written successfully with minimal settings")
         return True
         
     except Exception as e:
-        logger.warning(f"No separate audio method failed: {str(e)}")
+        logger.warning(f"Minimal settings method failed: {str(e)}")
     
     # Method 3: Use direct FFMPEG command as fallback
     try:
@@ -256,7 +260,14 @@ def write_video_robust(video_clip, output_path: str, temp_dir: str, video_id: st
 @app.post("/render")
 def render_video(data: RenderRequest):
     temp_dir = None
+    render_start_time = datetime.now()
+    
     try:
+        logger.info(f"=== RENDER START ===")
+        logger.info(f"Hook: {data.hook[:100]}...")
+        logger.info(f"Mood: {data.mood}")
+        logger.info(f"Audio URL: {data.narration_url}")
+        
         # Create temporary directory
         temp_dir = tempfile.mkdtemp()
         logger.info(f"Created temp directory: {temp_dir}")
@@ -300,9 +311,24 @@ def render_video(data: RenderRequest):
         # Load background video with 9:16 aspect ratio optimization
         background_video = VideoFileClip(background_path)
         
-        # Target dimensions for 9:16 aspect ratio
-        target_width = 720
-        target_height = 1280
+        # Adaptive target dimensions based on available resources
+        try:
+            # Try high quality first
+            target_width = 720
+            target_height = 1280
+            
+            # Check video file size to determine if we should reduce resolution
+            video_file_size = os.path.getsize(background_path)
+            if video_file_size > 50 * 1024 * 1024:  # If video > 50MB, use lower resolution
+                target_width = 540
+                target_height = 960
+                logger.info("Large video detected, using reduced resolution for better performance")
+                
+        except Exception as e:
+            # Fallback to safe resolution
+            target_width = 540
+            target_height = 960
+            logger.warning(f"Resolution detection failed, using safe resolution: {e}")
         
         # Check if video is already close to 9:16 aspect ratio
         current_ratio = background_video.w / background_video.h
@@ -360,7 +386,8 @@ def render_video(data: RenderRequest):
         
         # Add title at the top with improved bubbly styling
         try:
-            title_text = expanded_hook[:80] + "..." if len(expanded_hook) > 80 else expanded_hook
+            # Use original hook for display (preserves acronyms visually)
+            title_text = data.hook[:80] + "..." if len(data.hook) > 80 else data.hook
             
             # Create main title text
             title_main = TextClip(
@@ -410,20 +437,45 @@ def render_video(data: RenderRequest):
         try:
             logger.info("Starting subtitle generation...")
             body_text = expanded_body[:1000] + "..." if len(expanded_body) > 1000 else expanded_body
-            words = body_text.split()
             
-            # Create subtitle chunks (2-3 words per line for perfect sync)
-            chunk_size = 2  # Smaller chunks for better audio alignment
-            chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-            chunks = chunks[:30]  # Allow more chunks for better timing precision
+            # Smarter subtitle chunking that considers punctuation and speech patterns
+            import re
+            
+            # First, split by sentences or major punctuation
+            sentences = re.split(r'[.!?]+', body_text)
+            
+            chunks = []
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                    
+                words = sentence.split()
+                if len(words) <= 3:
+                    # Short sentence, use as single chunk
+                    chunks.append(sentence)
+                else:
+                    # Split longer sentences into 2-3 word chunks
+                    chunk_size = 2
+                    for i in range(0, len(words), chunk_size):
+                        chunk = ' '.join(words[i:i + chunk_size])
+                        chunks.append(chunk)
+            
+            # Limit total chunks for performance
+            chunks = chunks[:25]  # Reduced for better performance
             
             logger.info(f"Created {len(chunks)} subtitle chunks")
             
             # Perfect timing calculation for audio sync
-            # Start subtitles after title has been shown
-            subtitle_start_delay = 2.0  # 2 seconds to let title be read
-            subtitle_duration = max(audio_duration - subtitle_start_delay - 1, 10)  # Leave 1 sec at end
-            chunk_duration = subtitle_duration / len(chunks) if chunks else audio_duration
+            # Dynamic subtitle start delay based on audio duration
+            subtitle_start_delay = min(2.0, audio_duration * 0.05)  # 5% of audio or 2s max
+            subtitle_end_buffer = 1.0  # Leave buffer at end
+            subtitle_duration = max(audio_duration - subtitle_start_delay - subtitle_end_buffer, 5)
+            
+            # Better chunk duration calculation - account for natural speech patterns
+            base_chunk_duration = subtitle_duration / len(chunks) if chunks else audio_duration
+            # Add slight overlap for smoother reading experience
+            chunk_duration = max(base_chunk_duration, 1.5)  # Minimum 1.5s per chunk for readability
             
             # Position subtitles in lower-middle area for readability
             subtitle_y_position = int(target_height * 0.65)  # 65% down from top
@@ -438,33 +490,60 @@ def render_video(data: RenderRequest):
                     
                     logger.info(f"Processing subtitle {i+1}/{len(chunks)}: '{chunk}'")
                     
-                    # Create bubbly, easy-to-read subtitle text
-                    subtitle_main = TextClip(
-                        chunk,
-                        fontsize=56,  # Even larger for mobile readability
-                        color='white',
-                        font='Arial-Bold',
-                        stroke_color='black',
-                        stroke_width=6,  # Very thick outline for bubbly effect
-                        method='caption',
-                        size=(target_width-40, None),
-                        align='center'
-                    )
+                    # Create bubbly, easy-to-read subtitle text with error handling
+                    try:
+                        subtitle_main = TextClip(
+                            chunk,
+                            fontsize=56,  # Even larger for mobile readability
+                            color='white',
+                            font='Arial-Bold',
+                            stroke_color='black',
+                            stroke_width=6,  # Very thick outline for bubbly effect
+                            method='caption',
+                            size=(target_width-40, None),
+                            align='center'
+                        )
+                    except Exception as font_error:
+                        logger.warning(f"Font rendering failed for chunk {i+1}, trying simpler approach: {font_error}")
+                        # Fallback to simpler text clip
+                        subtitle_main = TextClip(
+                            chunk,
+                            fontsize=48,
+                            color='white',
+                            font='Arial',
+                            method='caption',
+                            size=(target_width-60, None),
+                            align='center'
+                        )
                     
                     logger.info(f"Created main subtitle text for chunk {i+1}")
                     
-                    # Try simpler approach first - just add the main subtitle without shadow
+                    # Position and time the subtitle
                     subtitle_final = subtitle_main.set_position(
                         ('center', subtitle_y_position)
-                    ).set_start(start_time).set_duration(chunk_duration * 1.4)
+                    ).set_start(start_time).set_duration(chunk_duration * 1.2)  # Slightly reduced overlap
                     
                     clips.append(subtitle_final)
                     subtitle_clips_added += 1
-                    logger.info(f"Added subtitle {i+1} successfully (simple version)")
+                    logger.info(f"Added subtitle {i+1} successfully")
                     
                 except Exception as chunk_error:
                     logger.error(f"Failed to create subtitle chunk {i+1}: {str(chunk_error)}")
-                    continue
+                    # Try simpler fallback for this chunk
+                    try:
+                        simple_chunk = TextClip(
+                            chunk,
+                            fontsize=40,
+                            color='white'
+                        ).set_position(('center', subtitle_y_position)).set_start(
+                            subtitle_start_delay + (i * chunk_duration)
+                        ).set_duration(chunk_duration)
+                        clips.append(simple_chunk)
+                        subtitle_clips_added += 1
+                        logger.info(f"Added simple fallback subtitle {i+1}")
+                    except:
+                        logger.error(f"Even simple fallback failed for chunk {i+1}, skipping")
+                        continue
             
             logger.info(f"Successfully added {subtitle_clips_added} subtitle clips")
                 
@@ -497,18 +576,33 @@ def render_video(data: RenderRequest):
         final_video = final_video.set_fps(24)
         final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
         
+        # Immediate cleanup of individual clips to free memory before encoding
+        try:
+            for clip in clips:
+                if hasattr(clip, 'close'):
+                    clip.close()
+            audio_clip.close()
+            logger.info("Individual clips cleaned up before encoding")
+        except Exception as e:
+            logger.warning(f"Error during early clip cleanup: {str(e)}")
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+        
         # Write video using robust method
         logger.info(f"Writing video to {output_path}")
         write_success = write_video_robust(final_video, output_path, temp_dir, video_id)
         
-        # Close clips to free memory
+        # Close final video clip immediately after writing
         try:
-            for clip in clips:
-                clip.close()
             final_video.close()
-            audio_clip.close()
+            logger.info("Final video clip closed")
         except Exception as e:
-            logger.warning(f"Error closing clips: {str(e)}")
+            logger.warning(f"Error closing final video clip: {str(e)}")
+        
+        # Force another garbage collection after encoding
+        gc.collect()
         
         if not write_success:
             raise HTTPException(status_code=500, detail="Failed to write video with all methods")
@@ -520,7 +614,7 @@ def render_video(data: RenderRequest):
         logger.info(f"Video successfully created: {os.path.getsize(output_path)} bytes")
         
         # Upload to Dropbox
-        clean_hook = "".join(c for c in expanded_hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        clean_hook = "".join(c for c in data.hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
         clean_hook = clean_hook[:50]
         dropbox_path = f"/final_videos/{clean_hook}_{video_id}.mp4"
         upload_success = upload_to_dropbox(output_path, dropbox_path)
@@ -530,10 +624,21 @@ def render_video(data: RenderRequest):
         else:
             message = "Video rendered successfully, but upload to Dropbox failed"
         
+        # Calculate render statistics
+        render_end_time = datetime.now()
+        total_render_time = (render_end_time - render_start_time).total_seconds()
+        
+        logger.info(f"=== RENDER COMPLETE ===")
+        logger.info(f"Total render time: {total_render_time:.2f} seconds")
+        logger.info(f"Output file size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
+        logger.info(f"Upload success: {upload_success}")
+        
         return {
             "video_path": output_path,
             "dropbox_path": dropbox_path if upload_success else None,
-            "message": message
+            "message": message,
+            "render_time_seconds": total_render_time,
+            "file_size_mb": round(os.path.getsize(output_path) / (1024*1024), 2)
         }
         
     except HTTPException:
