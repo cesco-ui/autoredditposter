@@ -11,6 +11,14 @@ from typing import Optional
 import subprocess
 import shutil
 
+# Fix for Pillow compatibility issue with MoviePy
+try:
+    from PIL import Image
+    if not hasattr(Image, 'ANTIALIAS'):
+        Image.ANTIALIAS = Image.LANCZOS
+except ImportError:
+    pass
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -242,15 +250,29 @@ def render_video(data: RenderRequest):
         # Load audio and video
         logger.info("Loading audio and video files...")
         
-        # Load background video with 9:16 aspect ratio
+        # Load background video with 9:16 aspect ratio optimization
         background_video = VideoFileClip(background_path)
         
-        # Ensure 9:16 aspect ratio (1080x1920 or 720x1280)
+        # Target dimensions for 9:16 aspect ratio
         target_width = 720
         target_height = 1280
         
-        # Resize and crop to 9:16 aspect ratio
-        if background_video.w / background_video.h != 9/16:
+        # Check if video is already close to 9:16 aspect ratio
+        current_ratio = background_video.w / background_video.h
+        target_ratio = 9/16
+        ratio_tolerance = 0.01  # Allow small variations
+        
+        if abs(current_ratio - target_ratio) <= ratio_tolerance:
+            # Video is already 9:16, just resize to target dimensions if needed
+            if background_video.w != target_width or background_video.h != target_height:
+                background_video = background_video.resize((target_width, target_height))
+                logger.info(f"Video was already 9:16, resized to {target_width}x{target_height}")
+            else:
+                logger.info(f"Video is already perfect 9:16 at {background_video.w}x{background_video.h}")
+        else:
+            # Video needs aspect ratio correction
+            logger.info(f"Converting video from {background_video.w}x{background_video.h} (ratio: {current_ratio:.3f}) to 9:16")
+            
             # Calculate scaling to fill the target dimensions
             scale_w = target_width / background_video.w
             scale_h = target_height / background_video.h
@@ -266,11 +288,7 @@ def render_video(data: RenderRequest):
                 width=target_width,
                 height=target_height
             )
-        else:
-            # Just resize to target dimensions
-            background_video = background_video.resize((target_width, target_height))
-        
-        logger.info(f"Video resized to 9:16 aspect ratio: {background_video.w}x{background_video.h}")
+            logger.info(f"Video converted to 9:16 aspect ratio: {background_video.w}x{background_video.h}")
         
         # Ensure FPS is set
         if not hasattr(background_video, 'fps') or background_video.fps is None:
@@ -448,4 +466,4 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
