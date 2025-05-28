@@ -503,18 +503,32 @@ def render_video(data: RenderRequest):
                             size=(target_width-40, None),
                             align='center'
                         )
+                        
+                        # Validate the subtitle was created properly
+                        if subtitle_main is None or subtitle_main.duration <= 0:
+                            raise Exception("TextClip creation returned invalid clip")
+                            
                     except Exception as font_error:
                         logger.warning(f"Font rendering failed for chunk {i+1}, trying simpler approach: {font_error}")
                         # Fallback to simpler text clip
-                        subtitle_main = TextClip(
-                            chunk,
-                            fontsize=48,
-                            color='white',
-                            font='Arial',
-                            method='caption',
-                            size=(target_width-60, None),
-                            align='center'
-                        )
+                        try:
+                            subtitle_main = TextClip(
+                                chunk,
+                                fontsize=48,
+                                color='white',
+                                font='Arial',
+                                method='caption',
+                                size=(target_width-60, None),
+                                align='center'
+                            )
+                            
+                            # Validate fallback clip
+                            if subtitle_main is None or subtitle_main.duration <= 0:
+                                raise Exception("Fallback TextClip also failed")
+                                
+                        except Exception as fallback_error:
+                            logger.error(f"Even fallback font rendering failed: {fallback_error}")
+                            continue  # Skip this subtitle chunk entirely
                     
                     logger.info(f"Created main subtitle text for chunk {i+1}")
                     
@@ -572,7 +586,30 @@ def render_video(data: RenderRequest):
         
         # Compose video
         logger.info("Composing final video...")
-        final_video = CompositeVideoClip(clips)
+        
+        # Validate all clips before composition
+        valid_clips = []
+        for i, clip in enumerate(clips):
+            try:
+                if clip is not None and hasattr(clip, 'duration') and clip.duration > 0:
+                    # Test if clip can generate a frame
+                    test_frame = clip.get_frame(0)
+                    if test_frame is not None:
+                        valid_clips.append(clip)
+                        logger.info(f"Clip {i} validated successfully")
+                    else:
+                        logger.warning(f"Clip {i} returns None frame, skipping")
+                else:
+                    logger.warning(f"Clip {i} is invalid or has no duration, skipping")
+            except Exception as e:
+                logger.warning(f"Clip {i} validation failed: {str(e)}, skipping")
+        
+        if not valid_clips:
+            raise HTTPException(status_code=500, detail="No valid clips to compose video")
+        
+        logger.info(f"Using {len(valid_clips)} valid clips out of {len(clips)} total clips")
+        
+        final_video = CompositeVideoClip(valid_clips)
         final_video = final_video.set_fps(24)
         final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
         
