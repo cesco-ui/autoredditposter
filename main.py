@@ -242,13 +242,35 @@ def render_video(data: RenderRequest):
         # Load audio and video
         logger.info("Loading audio and video files...")
         
-        # Load background video with reduced resolution to save memory
+        # Load background video with 9:16 aspect ratio
         background_video = VideoFileClip(background_path)
         
-        # Resize if too large (reduce computational load)
-        if background_video.w > 720:
-            background_video = background_video.resize(width=720)
-            logger.info(f"Resized video to 720p for better performance")
+        # Ensure 9:16 aspect ratio (1080x1920 or 720x1280)
+        target_width = 720
+        target_height = 1280
+        
+        # Resize and crop to 9:16 aspect ratio
+        if background_video.w / background_video.h != 9/16:
+            # Calculate scaling to fill the target dimensions
+            scale_w = target_width / background_video.w
+            scale_h = target_height / background_video.h
+            scale = max(scale_w, scale_h)  # Scale to fill
+            
+            # Resize video
+            background_video = background_video.resize(scale)
+            
+            # Crop to exact 9:16 ratio
+            background_video = background_video.crop(
+                x_center=background_video.w/2,
+                y_center=background_video.h/2,
+                width=target_width,
+                height=target_height
+            )
+        else:
+            # Just resize to target dimensions
+            background_video = background_video.resize((target_width, target_height))
+        
+        logger.info(f"Video resized to 9:16 aspect ratio: {background_video.w}x{background_video.h}")
         
         # Ensure FPS is set
         if not hasattr(background_video, 'fps') or background_video.fps is None:
@@ -271,48 +293,90 @@ def render_video(data: RenderRequest):
         # Create simplified overlays to reduce complexity
         clips = [background_video]
         
-        # Add simple title (reduced complexity)
+        # Add title at the top with better formatting
         try:
-            title_text = data.hook[:100] + "..." if len(data.hook) > 100 else data.hook
+            title_text = data.hook[:80] + "..." if len(data.hook) > 80 else data.hook
             title_clip = TextClip(
                 title_text,
-                fontsize=28,  # Smaller font
+                fontsize=36,  # Larger font for mobile
                 color='white',
                 font='Arial-Bold',
                 stroke_color='black',
-                stroke_width=2
-            ).set_position(('center', 50)).set_duration(min(8, audio_duration))
+                stroke_width=3,
+                method='caption',
+                size=(target_width-40, None),  # Allow text wrapping
+                align='center'
+            ).set_position(('center', 80)).set_duration(min(8, audio_duration))
             clips.append(title_clip)
             
         except Exception as e:
             logger.warning(f"Skipping title due to error: {str(e)}")
         
-        # Add simplified subtitles (fewer chunks)
+        # Add improved subtitles in the lower third (Crayo.ai style)
         try:
-            body_text = data.body[:500] + "..." if len(data.body) > 500 else data.body  # Reduced text
+            body_text = data.body[:800] + "..." if len(data.body) > 800 else data.body
             words = body_text.split()
             
-            # Create fewer, longer subtitle chunks
-            chunk_size = 20
+            # Create subtitle chunks (3-5 words per line for Crayo.ai style)
+            chunk_size = 4  # Even smaller chunks for TikTok style
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-            chunks = chunks[:10]  # Limit to 10 chunks max
+            chunks = chunks[:20]  # Allow more chunks for longer stories
             
             chunk_duration = audio_duration / len(chunks) if chunks else audio_duration
             
+            # Position subtitles in the lower third of the screen (Crayo.ai style)
+            subtitle_y_position = int(target_height * 0.7)  # 70% down from top (lower third)
+            
             for i, chunk in enumerate(chunks):
                 start_time = i * chunk_duration
-                subtitle = TextClip(
+                
+                # Create clean text without background (Crayo.ai style)
+                subtitle_text = TextClip(
                     chunk,
-                    fontsize=20,  # Smaller font
+                    fontsize=38,  # Larger, bold text
                     color='white',
-                    font='Arial',
+                    font='Arial-Bold',
                     stroke_color='black',
-                    stroke_width=1
-                ).set_position(('center', 'bottom')).set_start(start_time).set_duration(chunk_duration)
-                clips.append(subtitle)
+                    stroke_width=3,  # Thick outline for readability
+                    method='caption',
+                    size=(target_width-80, None),  # More margin from edges
+                    align='center'
+                )
+                
+                # Position in lower third with some variation to avoid overlap
+                y_offset = (i % 3) * 15  # Slight vertical variation for consecutive subtitles
+                final_y_position = subtitle_y_position + y_offset
+                
+                # Make sure we don't go off screen
+                if final_y_position + 60 > target_height:
+                    final_y_position = subtitle_y_position
+                
+                subtitle_final = subtitle_text.set_position(
+                    ('center', final_y_position)
+                ).set_start(start_time).set_duration(chunk_duration)
+                
+                clips.append(subtitle_final)
                 
         except Exception as e:
             logger.warning(f"Skipping subtitles due to error: {str(e)}")
+            
+            # Fallback to simple subtitles without background
+            try:
+                body_text = data.body[:400] + "..." if len(data.body) > 400 else data.body
+                simple_subtitle = TextClip(
+                    body_text,
+                    fontsize=32,
+                    color='white',
+                    font='Arial-Bold',
+                    stroke_color='black',
+                    stroke_width=3,
+                    method='caption',
+                    size=(target_width-60, None),
+                    align='center'
+                ).set_position(('center', int(target_height * 0.7))).set_duration(audio_duration)
+                clips.append(simple_subtitle)
+            except Exception as e2:
+                logger.warning(f"Even simple subtitles failed: {str(e2)}")
         
         # Compose video
         logger.info("Composing final video...")
