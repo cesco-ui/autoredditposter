@@ -5,11 +5,14 @@ import tempfile
 import os
 import uuid
 import random
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip
+from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip, ImageClip
 import logging
 from typing import Optional
 import subprocess
 import shutil
+import asyncio
+import concurrent.futures
+from datetime import datetime
 
 # Fix for Pillow compatibility issue with MoviePy
 try:
@@ -18,6 +21,41 @@ try:
         Image.ANTIALIAS = Image.LANCZOS
 except ImportError:
     pass
+
+def expand_reddit_acronyms(text: str) -> str:
+    """Expand common Reddit acronyms for better text-to-speech"""
+    expansions = {
+        'AITA': 'Am I the A Hole',
+        'AITAH': 'Am I the A Hole',
+        'NTA': 'Not the A Hole',
+        'YTA': 'You are the A Hole',
+        'ESH': 'Everyone Sucks Here',
+        'NAH': 'No A Holes Here',
+        'INFO': 'I need more information',
+        'WIBTA': 'Would I be the A Hole',
+        'WIBTAH': 'Would I be the A Hole',
+        'SO': 'significant other',
+        'BF': 'boyfriend',
+        'GF': 'girlfriend',
+        'DH': 'dear husband',
+        'DW': 'dear wife',
+        'MIL': 'mother in law',
+        'FIL': 'father in law',
+        'SIL': 'sister in law',
+        'BIL': 'brother in law',
+        'DIL': 'daughter in law',
+        'SAHM': 'stay at home mom',
+        'SAHD': 'stay at home dad'
+    }
+    
+    # Replace acronyms (case insensitive, whole words only)
+    import re
+    for acronym, expansion in expansions.items():
+        # Use word boundaries to avoid partial matches
+        pattern = r'\b' + re.escape(acronym) + r'\b'
+        text = re.sub(pattern, expansion, text, flags=re.IGNORECASE)
+    
+    return text
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +68,10 @@ class RenderRequest(BaseModel):
     body: str
     mood: str
     narration_url: str
+
+class BatchRenderRequest(BaseModel):
+    videos: list[RenderRequest]
+    max_concurrent: int = 3  # Limit concurrent processing to avoid resource exhaustion
 
 # Dropbox configuration
 DROPBOX_ACCESS_TOKEN = os.getenv('DROPBOX_ACCESS_TOKEN')
@@ -224,6 +266,11 @@ def render_video(data: RenderRequest):
         output_filename = f"{video_id}_output.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
+        # Expand Reddit acronyms for better text-to-speech
+        expanded_hook = expand_reddit_acronyms(data.hook)
+        expanded_body = expand_reddit_acronyms(data.body)
+        logger.info(f"Expanded acronyms in text for better narration")
+        
         # Ensure narration URL uses direct download
         narration_url = data.narration_url
         if 'dropbox.com' in narration_url and '&dl=0' in narration_url:
@@ -311,90 +358,136 @@ def render_video(data: RenderRequest):
         # Create simplified overlays to reduce complexity
         clips = [background_video]
         
-        # Add title at the top with better formatting
+        # Add title at the top with improved bubbly styling
         try:
-            title_text = data.hook[:80] + "..." if len(data.hook) > 80 else data.hook
-            title_clip = TextClip(
+            title_text = expanded_hook[:80] + "..." if len(expanded_hook) > 80 else expanded_hook
+            
+            # Create main title text
+            title_main = TextClip(
                 title_text,
-                fontsize=36,  # Larger font for mobile
+                fontsize=42,  # Larger, bubbly size
                 color='white',
                 font='Arial-Bold',
                 stroke_color='black',
-                stroke_width=3,
+                stroke_width=4,  # Thick outline for bubbly effect
                 method='caption',
-                size=(target_width-40, None),  # Allow text wrapping
+                size=(target_width-60, None),  # Allow text wrapping
                 align='center'
-            ).set_position(('center', 80)).set_duration(min(8, audio_duration))
-            clips.append(title_clip)
+            )
+            
+            # Add drop shadow for bubbly depth effect
+            try:
+                title_shadow = TextClip(
+                    title_text,
+                    fontsize=42,
+                    color='rgba(0,0,0,0.6)',  # Semi-transparent black shadow
+                    font='Arial-Bold',
+                    method='caption',
+                    size=(target_width-60, None),
+                    align='center'
+                )
+                
+                # Composite title with shadow for bubbly effect
+                shadow_offset = 4
+                bubbly_title = CompositeVideoClip([
+                    title_shadow.set_position(('center', 80 + shadow_offset)),
+                    title_main.set_position(('center', 80))
+                ]).set_duration(min(10, audio_duration))  # Show title longer
+                
+                clips.append(bubbly_title)
+                logger.info("Added bubbly title with shadow effect")
+                
+            except Exception as shadow_error:
+                # Fallback to simple title if shadow fails
+                logger.warning(f"Title shadow failed, using simple title: {shadow_error}")
+                title_clip = title_main.set_position(('center', 80)).set_duration(min(10, audio_duration))
+                clips.append(title_clip)
             
         except Exception as e:
             logger.warning(f"Skipping title due to error: {str(e)}")
         
-        # Add improved subtitles in the middle area (Crayo.ai style)
+        # Add improved subtitles with perfect audio sync and bubbly styling
         try:
-            body_text = data.body[:800] + "..." if len(data.body) > 800 else data.body
+            body_text = expanded_body[:1000] + "..." if len(expanded_body) > 1000 else expanded_body
             words = body_text.split()
             
-            # Create subtitle chunks (2-3 words per line for better Crayo.ai style)
-            chunk_size = 3  # Smaller chunks for better readability and timing
+            # Create subtitle chunks (2-3 words per line for perfect sync)
+            chunk_size = 2  # Smaller chunks for better audio alignment
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-            chunks = chunks[:25]  # Allow more chunks for better timing
+            chunks = chunks[:30]  # Allow more chunks for better timing precision
             
-            # Better timing calculation - account for natural speech pauses
-            total_subtitle_time = audio_duration * 0.9  # Use 90% of audio time for subtitles
-            chunk_duration = total_subtitle_time / len(chunks) if chunks else audio_duration
+            # Perfect timing calculation for audio sync
+            # Start subtitles after title has been shown
+            subtitle_start_delay = 2.0  # 2 seconds to let title be read
+            subtitle_duration = max(audio_duration - subtitle_start_delay - 1, 10)  # Leave 1 sec at end
+            chunk_duration = subtitle_duration / len(chunks) if chunks else audio_duration
             
-            # Position subtitles in the middle area (like Crayo.ai - higher than lower third)
-            subtitle_y_position = int(target_height * 0.55)  # 55% down from top (middle area)
+            # Position subtitles in lower-middle area for readability
+            subtitle_y_position = int(target_height * 0.65)  # 65% down from top
             
             for i, chunk in enumerate(chunks):
-                # Add slight delay at start and better spacing
-                start_time = (i * chunk_duration) + 0.5  # Small delay to sync better
+                # Perfect timing sync
+                start_time = subtitle_start_delay + (i * chunk_duration)
                 
-                # Create clean text without background (Crayo.ai style)
-                subtitle_text = TextClip(
+                # Create bubbly, easy-to-read subtitle text
+                subtitle_main = TextClip(
                     chunk,
-                    fontsize=48,  # Much larger text like Crayo.ai
+                    fontsize=56,  # Even larger for mobile readability
                     color='white',
                     font='Arial-Bold',
                     stroke_color='black',
-                    stroke_width=4,  # Thicker outline for better readability
+                    stroke_width=6,  # Very thick outline for bubbly effect
                     method='caption',
-                    size=(target_width-60, None),  # Less margin for bigger text
+                    size=(target_width-40, None),
                     align='center'
                 )
                 
-                # Position in middle area with minimal variation
-                y_offset = (i % 2) * 10  # Very slight vertical variation
-                final_y_position = subtitle_y_position + y_offset
-                
-                # Make sure we don't go off screen
-                if final_y_position + 80 > target_height:
-                    final_y_position = subtitle_y_position
-                
-                subtitle_final = subtitle_text.set_position(
-                    ('center', final_y_position)
-                ).set_start(start_time).set_duration(chunk_duration * 1.2)  # Slightly longer duration for overlap
-                
-                clips.append(subtitle_final)
+                # Add drop shadow for maximum bubbly effect
+                try:
+                    subtitle_shadow = TextClip(
+                        chunk,
+                        fontsize=56,
+                        color='rgba(0,0,0,0.7)',  # Darker shadow for subtitles
+                        font='Arial-Bold',
+                        method='caption',
+                        size=(target_width-40, None),
+                        align='center'
+                    )
+                    
+                    # Composite subtitle with shadow for bubbly effect
+                    shadow_offset = 4
+                    bubbly_subtitle = CompositeVideoClip([
+                        subtitle_shadow.set_position(('center', subtitle_y_position + shadow_offset)),
+                        subtitle_main.set_position(('center', subtitle_y_position))
+                    ]).set_start(start_time).set_duration(chunk_duration * 1.4)  # Slight overlap for smooth reading
+                    
+                    clips.append(bubbly_subtitle)
+                    
+                except Exception as shadow_error:
+                    # Fallback to simple subtitle if shadow fails
+                    logger.warning(f"Subtitle shadow failed for chunk {i}: {shadow_error}")
+                    subtitle_final = subtitle_main.set_position(
+                        ('center', subtitle_y_position)
+                    ).set_start(start_time).set_duration(chunk_duration * 1.4)
+                    clips.append(subtitle_final)
                 
         except Exception as e:
             logger.warning(f"Skipping subtitles due to error: {str(e)}")
             
-            # Fallback to simple subtitles without background
+            # Fallback to simple subtitles with bubbly styling
             try:
-                body_text = data.body[:400] + "..." if len(data.body) > 400 else data.body
+                body_text = expanded_body[:600] + "..." if len(expanded_body) > 600 else expanded_body
                 simple_subtitle = TextClip(
                     body_text,
-                    fontsize=42,  # Larger fallback text
+                    fontsize=50,
                     color='white',
                     font='Arial-Bold',
                     stroke_color='black',
-                    stroke_width=4,
+                    stroke_width=5,
                     method='caption',
                     size=(target_width-60, None),
                     align='center'
-                ).set_position(('center', int(target_height * 0.55))).set_duration(audio_duration)
+                ).set_position(('center', int(target_height * 0.65))).set_start(2.0).set_duration(audio_duration - 3)
                 clips.append(simple_subtitle)
             except Exception as e2:
                 logger.warning(f"Even simple subtitles failed: {str(e2)}")
@@ -428,7 +521,7 @@ def render_video(data: RenderRequest):
         logger.info(f"Video successfully created: {os.path.getsize(output_path)} bytes")
         
         # Upload to Dropbox
-        clean_hook = "".join(c for c in data.hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        clean_hook = "".join(c for c in expanded_hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
         clean_hook = clean_hook[:50]
         dropbox_path = f"/final_videos/{clean_hook}_{video_id}.mp4"
         upload_success = upload_to_dropbox(output_path, dropbox_path)
@@ -458,6 +551,77 @@ def render_video(data: RenderRequest):
                 logger.info(f"Cleaned up temp directory: {temp_dir}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup temp directory: {str(e)}")
+
+def render_single_video_safe(video_data: RenderRequest) -> dict:
+    """Wrapper function for safe single video rendering in batch processing"""
+    try:
+        # Call the main render function but return dict instead of HTTP response
+        result = render_video(video_data)
+        return {
+            "success": True,
+            "video_data": video_data.dict(),
+            "result": result,
+            "error": None
+        }
+    except Exception as e:
+        logger.error(f"Error rendering video for hook '{video_data.hook[:50]}...': {str(e)}")
+        return {
+            "success": False,
+            "video_data": video_data.dict(),
+            "result": None,
+            "error": str(e)
+        }
+
+@app.post("/render-batch")
+async def render_batch_videos(batch_data: BatchRenderRequest):
+    """Render multiple videos concurrently"""
+    start_time = datetime.now()
+    logger.info(f"Starting batch render of {len(batch_data.videos)} videos")
+    
+    # Limit concurrent processing to avoid overwhelming the server
+    max_workers = min(batch_data.max_concurrent, len(batch_data.videos), 3)
+    
+    results = []
+    successful_renders = 0
+    failed_renders = 0
+    
+    # Process videos in batches using ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all video rendering tasks
+        future_to_video = {
+            executor.submit(render_single_video_safe, video): video 
+            for video in batch_data.videos
+        }
+        
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_video):
+            result = future.result()
+            results.append(result)
+            
+            if result["success"]:
+                successful_renders += 1
+                logger.info(f"✅ Video {successful_renders}/{len(batch_data.videos)} completed successfully")
+            else:
+                failed_renders += 1
+                logger.error(f"❌ Video failed: {result['error']}")
+    
+    end_time = datetime.now()
+    total_time = (end_time - start_time).total_seconds()
+    
+    # Prepare batch summary
+    summary = {
+        "batch_id": str(uuid.uuid4()),
+        "total_videos": len(batch_data.videos),
+        "successful_renders": successful_renders,
+        "failed_renders": failed_renders,
+        "processing_time_seconds": total_time,
+        "average_time_per_video": total_time / len(batch_data.videos) if batch_data.videos else 0,
+        "results": results
+    }
+    
+    logger.info(f"Batch processing completed: {successful_renders}/{len(batch_data.videos)} successful in {total_time:.1f}s")
+    
+    return summary
 
 @app.get("/")
 def read_root():
