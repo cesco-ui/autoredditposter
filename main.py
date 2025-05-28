@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-class VideoRequest(BaseModel):
+class RenderRequest(BaseModel):
     hook: str
     body: str
     mood: str
-    audio_url: str
+    narration_url: str
 
 # Dropbox configuration
 DROPBOX_ACCESS_TOKEN = os.getenv('DROPBOX_ACCESS_TOKEN')
@@ -55,7 +55,11 @@ MOOD_BACKGROUNDS = {
 def download_file(url: str, temp_dir: str, filename: str) -> str:
     """Download a file from URL to temporary directory"""
     try:
-        response = requests.get(url, stream=True, timeout=30)
+        # Add headers to mimic browser request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, stream=True, timeout=60, headers=headers)
         response.raise_for_status()
         
         file_path = os.path.join(temp_dir, filename)
@@ -163,8 +167,8 @@ def create_subtitle_clips(text: str, duration: float, video_size: tuple) -> list
         logger.error(f"Error creating subtitle clips: {str(e)}")
         return []
 
-@app.post("/render-video")
-async def render_video(request: VideoRequest):
+@app.post("/render")
+def render_video(data: RenderRequest):
     temp_dir = None
     try:
         # Create temporary directory
@@ -176,31 +180,44 @@ async def render_video(request: VideoRequest):
         output_filename = f"{video_id}_output.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
-        # Download audio file
-        audio_path = download_file(request.audio_url, temp_dir, f"{video_id}_audio.mp3")
+        # Ensure narration URL uses direct download
+        narration_url = data.narration_url
+        if 'dropbox.com' in narration_url and '&dl=0' in narration_url:
+            narration_url = narration_url.replace('&dl=0', '&dl=1')
         
-        # Get background video URL based on mood
-        background_url = random.choice(MOOD_BACKGROUNDS.get(request.mood.lower(), MOOD_BACKGROUNDS["reflective"]))
+        # Download audio file
+        audio_path = download_file(narration_url, temp_dir, f"{video_id}_audio.mp3")
+        
+        # Verify audio file was downloaded
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+            raise HTTPException(status_code=400, detail="Audio file is empty or missing")
+        
+        # Get background video URL based on mood - randomly select from available videos
+        if data.mood.lower() not in MOOD_BACKGROUNDS:
+            raise HTTPException(status_code=400, detail=f"Unknown mood: {data.mood}")
+        
+        background_url = random.choice(MOOD_BACKGROUNDS[data.mood.lower()])
         background_path = download_file(background_url, temp_dir, f"{video_id}_background.mp4")
+        
+        # Verify background video was downloaded
+        if not os.path.exists(background_path) or os.path.getsize(background_path) == 0:
+            raise HTTPException(status_code=400, detail="Background video is empty or missing")
         
         # Load video and audio
         logger.info("Loading video and audio files")
-        background_video = VideoFileClip(background_path)
+        background_video = VideoFileClip(background_path).subclip(0, 60)  # Limit to 60 seconds
         audio_clip = VideoFileClip(audio_path).audio
         
-        # Get audio duration and limit to 60 seconds
-        audio_duration = min(audio_clip.duration, 60)
+        # Get audio duration and limit to video duration
+        audio_duration = min(audio_clip.duration, background_video.duration)
         
         # Trim background video to match audio duration
-        if background_video.duration < audio_duration:
-            # Loop the background video if it's shorter than audio
-            background_video = background_video.loop(duration=audio_duration)
-        else:
+        if background_video.duration > audio_duration:
             background_video = background_video.subclip(0, audio_duration)
         
-        # Create title overlay
+        # Create title overlay (hook)
         title_clip = TextClip(
-            request.hook,
+            data.hook[:150] + "..." if len(data.hook) > 150 else data.hook,
             fontsize=32,
             color='white',
             font='Arial-Bold',
@@ -208,10 +225,11 @@ async def render_video(request: VideoRequest):
             stroke_width=3,
             method='caption',
             size=(background_video.w - 40, None)
-        ).set_position(('center', 'top')).set_duration(min(5, audio_duration))
+        ).set_position(('center', 'top')).set_duration(min(10, audio_duration))
         
-        # Create subtitle clips
-        subtitle_clips = create_subtitle_clips(request.body, audio_duration, (background_video.w, background_video.h))
+        # Create subtitle clips from body text
+        body_text = data.body[:1000] + "..." if len(data.body) > 1000 else data.body
+        subtitle_clips = create_subtitle_clips(body_text, audio_duration, (background_video.w, background_video.h))
         
         # Compose final video
         logger.info("Composing final video")
@@ -228,16 +246,26 @@ async def render_video(request: VideoRequest):
             temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
             remove_temp=True,
             fps=24,
-            preset='medium'
+            preset='medium',
+            verbose=False,
+            logger=None
         )
         
         # Close clips to free memory
         background_video.close()
         audio_clip.close()
         final_video.close()
+        for clip in subtitle_clips:
+            clip.close()
+        
+        # Verify output file was created
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise HTTPException(status_code=500, detail="Video rendering failed - output file is empty")
         
         # Upload to Dropbox
-        dropbox_path = f"/final_videos/{output_filename}"
+        clean_hook = "".join(c for c in data.hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        clean_hook = clean_hook[:50]  # Limit length
+        dropbox_path = f"/final_videos/{clean_hook}_{video_id}.mp4"
         upload_success = upload_to_dropbox(output_path, dropbox_path)
         
         if upload_success:
@@ -247,6 +275,7 @@ async def render_video(request: VideoRequest):
         
         return {
             "video_path": output_path,
+            "dropbox_path": dropbox_path if upload_success else None,
             "message": message
         }
         
@@ -264,10 +293,14 @@ async def render_video(request: VideoRequest):
             except Exception as e:
                 logger.warning(f"Failed to cleanup temp directory: {str(e)}")
 
+@app.get("/")
+def read_root():
+    return {"message": "Reddit Story Video Renderer API"}
+
 @app.get("/health")
-async def health_check():
+def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
