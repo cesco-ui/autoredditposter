@@ -8,6 +8,8 @@ import random
 from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip
 import logging
 from typing import Optional
+import subprocess
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,78 +96,112 @@ def upload_to_dropbox(file_path: str, dropbox_path: str) -> bool:
             'Content-Type': 'application/octet-stream'
         }
         
-        # Log headers for debugging (without the token)
-        debug_headers = headers.copy()
-        debug_headers['Authorization'] = 'Bearer [REDACTED]'
-        logger.info(f"Upload headers: {debug_headers}")
-        
         with open(file_path, 'rb') as f:
             response = requests.post(
                 'https://content.dropboxapi.com/2/files/upload',
                 headers=headers,
                 data=f,
-                timeout=300  # Increased timeout for large files
+                timeout=300
             )
-        
-        logger.info(f"Dropbox API response status: {response.status_code}")
         
         if response.status_code == 200:
             response_data = response.json()
             logger.info(f"Successfully uploaded to Dropbox: {dropbox_path}")
-            logger.info(f"Dropbox response: {response_data}")
             return True
         else:
-            logger.error(f"Dropbox upload failed: {response.status_code}")
-            logger.error(f"Response headers: {response.headers}")
-            logger.error(f"Response text: {response.text}")
+            logger.error(f"Dropbox upload failed: {response.status_code} - {response.text}")
             return False
             
-    except requests.exceptions.Timeout:
-        logger.error("Dropbox upload timed out")
-        return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error during Dropbox upload: {str(e)}")
-        return False
     except Exception as e:
-        logger.error(f"Unexpected error uploading to Dropbox: {str(e)}")
+        logger.error(f"Error uploading to Dropbox: {str(e)}")
         return False
 
-def create_subtitle_clips(text: str, duration: float, video_size: tuple) -> list:
-    """Create scrolling subtitle clips"""
+def write_video_robust(video_clip, output_path: str, temp_dir: str, video_id: str) -> bool:
+    """Write video with multiple fallback methods"""
+    
+    # Method 1: Try with conservative settings first
     try:
-        # Split text into chunks for better readability
-        words = text.split()
-        chunks = []
-        chunk_size = 15  # words per chunk
-        
-        for i in range(0, len(words), chunk_size):
-            chunk = ' '.join(words[i:i + chunk_size])
-            chunks.append(chunk)
-        
-        subtitle_clips = []
-        chunk_duration = duration / len(chunks) if chunks else duration
-        
-        for i, chunk in enumerate(chunks):
-            start_time = i * chunk_duration
-            
-            subtitle = TextClip(
-                chunk,
-                fontsize=24,
-                color='white',
-                font='Arial-Bold',
-                stroke_color='black',
-                stroke_width=2,
-                method='caption',
-                size=(video_size[0] - 40, None)
-            ).set_position(('center', 'bottom')).set_start(start_time).set_duration(chunk_duration)
-            
-            subtitle_clips.append(subtitle)
-        
-        return subtitle_clips
+        logger.info("Attempting video write with conservative settings...")
+        video_clip.write_videofile(
+            output_path,
+            codec='libx264',
+            audio_codec='aac',
+            bitrate="1000k",  # Lower bitrate
+            fps=24,
+            preset='ultrafast',  # Fastest encoding
+            threads=1,  # Single thread to reduce resource usage
+            temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
+            remove_temp=True,
+            verbose=False,
+            logger=None
+        )
+        logger.info("Video written successfully with conservative settings")
+        return True
         
     except Exception as e:
-        logger.error(f"Error creating subtitle clips: {str(e)}")
-        return []
+        logger.warning(f"Conservative method failed: {str(e)}")
+    
+    # Method 2: Try without audio encoding
+    try:
+        logger.info("Attempting video write without separate audio encoding...")
+        video_clip.write_videofile(
+            output_path,
+            codec='libx264',
+            fps=24,
+            preset='ultrafast',
+            threads=1,
+            verbose=False,
+            logger=None
+        )
+        logger.info("Video written successfully without separate audio encoding")
+        return True
+        
+    except Exception as e:
+        logger.warning(f"No separate audio method failed: {str(e)}")
+    
+    # Method 3: Use direct FFMPEG command as fallback
+    try:
+        logger.info("Attempting direct FFMPEG encoding...")
+        
+        # Write video without audio first
+        temp_video_path = os.path.join(temp_dir, f"{video_id}_temp_video.mp4")
+        video_clip.without_audio().write_videofile(
+            temp_video_path,
+            codec='libx264',
+            fps=24,
+            preset='ultrafast',
+            threads=1,
+            verbose=False,
+            logger=None
+        )
+        
+        # Write audio separately
+        temp_audio_path = os.path.join(temp_dir, f"{video_id}_temp_audio.wav")
+        video_clip.audio.write_audiofile(temp_audio_path, verbose=False, logger=None)
+        
+        # Combine using FFMPEG command
+        cmd = [
+            'ffmpeg', '-y',  # -y to overwrite
+            '-i', temp_video_path,
+            '-i', temp_audio_path,
+            '-c:v', 'copy',  # Copy video stream
+            '-c:a', 'aac',   # Encode audio to AAC
+            '-shortest',     # End when shortest stream ends
+            output_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        
+        if result.returncode == 0:
+            logger.info("Video written successfully using direct FFMPEG")
+            return True
+        else:
+            logger.error(f"FFMPEG command failed: {result.stderr}")
+            
+    except Exception as e:
+        logger.warning(f"Direct FFMPEG method failed: {str(e)}")
+    
+    return False
 
 @app.post("/render")
 def render_video(data: RenderRequest):
@@ -192,7 +228,7 @@ def render_video(data: RenderRequest):
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise HTTPException(status_code=400, detail="Audio file is empty or missing")
         
-        # Get background video URL based on mood - randomly select from available videos
+        # Get background video URL based on mood
         if data.mood.lower() not in MOOD_BACKGROUNDS:
             raise HTTPException(status_code=400, detail=f"Unknown mood: {data.mood}")
         
@@ -203,132 +239,112 @@ def render_video(data: RenderRequest):
         if not os.path.exists(background_path) or os.path.getsize(background_path) == 0:
             raise HTTPException(status_code=400, detail="Background video is empty or missing")
         
-        # Load video and audio with better error handling
-        logger.info("Loading video and audio files...")
+        # Load audio and video
+        logger.info("Loading audio and video files...")
         
-        try:
-            # Load background video with explicit FPS handling
-            logger.info(f"Loading background video: {background_path}")
-            background_video = VideoFileClip(background_path)
-            
-            # Ensure the video has a valid FPS
-            if not hasattr(background_video, 'fps') or background_video.fps is None:
-                logger.warning("Background video has no FPS info, setting to 24")
-                background_video = background_video.set_fps(24)
-            
-            # Limit to 60 seconds
-            background_video = background_video.subclip(0, min(60, background_video.duration))
-            
-            logger.info(f"Background video loaded: {background_video.duration}s, {background_video.fps}fps")
-            
-        except Exception as e:
-            logger.error(f"Error loading background video: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to load background video: {str(e)}")
+        # Load background video with reduced resolution to save memory
+        background_video = VideoFileClip(background_path)
         
-        try:
-            # Load audio using AudioFileClip instead of VideoFileClip
-            logger.info(f"Loading audio: {audio_path}")
-            audio_clip = AudioFileClip(audio_path)
-            logger.info(f"Audio loaded: {audio_clip.duration}s")
-            
-        except Exception as e:
-            logger.error(f"Error loading audio: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to load audio: {str(e)}")
+        # Resize if too large (reduce computational load)
+        if background_video.w > 720:
+            background_video = background_video.resize(width=720)
+            logger.info(f"Resized video to 720p for better performance")
         
-        # Get audio duration and limit to video duration
+        # Ensure FPS is set
+        if not hasattr(background_video, 'fps') or background_video.fps is None:
+            background_video = background_video.set_fps(24)
+        
+        # Limit duration to reduce processing time
+        max_duration = min(45, background_video.duration)  # Reduced to 45s max
+        background_video = background_video.subclip(0, max_duration)
+        
+        # Load audio
+        audio_clip = AudioFileClip(audio_path)
         audio_duration = min(audio_clip.duration, background_video.duration)
-        logger.info(f"Using duration: {audio_duration}s")
         
-        # Trim background video to match audio duration
+        logger.info(f"Using duration: {audio_duration}s, video size: {background_video.w}x{background_video.h}")
+        
+        # Trim video to match audio
         if background_video.duration > audio_duration:
             background_video = background_video.subclip(0, audio_duration)
         
-        # Create title overlay (hook)
+        # Create simplified overlays to reduce complexity
+        clips = [background_video]
+        
+        # Add simple title (reduced complexity)
         try:
-            logger.info("Creating title overlay...")
+            title_text = data.hook[:100] + "..." if len(data.hook) > 100 else data.hook
             title_clip = TextClip(
-                data.hook[:150] + "..." if len(data.hook) > 150 else data.hook,
-                fontsize=32,
+                title_text,
+                fontsize=28,  # Smaller font
                 color='white',
                 font='Arial-Bold',
                 stroke_color='black',
-                stroke_width=3,
-                method='caption',
-                size=(background_video.w - 40, None)
-            ).set_position(('center', 'top')).set_duration(min(10, audio_duration))
+                stroke_width=2
+            ).set_position(('center', 50)).set_duration(min(8, audio_duration))
+            clips.append(title_clip)
             
         except Exception as e:
-            logger.error(f"Error creating title: {str(e)}")
-            title_clip = None  # Continue without title if it fails
+            logger.warning(f"Skipping title due to error: {str(e)}")
         
-        # Create subtitle clips from body text
+        # Add simplified subtitles (fewer chunks)
         try:
-            logger.info("Creating subtitle clips...")
-            body_text = data.body[:1000] + "..." if len(data.body) > 1000 else data.body
-            subtitle_clips = create_subtitle_clips(body_text, audio_duration, (background_video.w, background_video.h))
+            body_text = data.body[:500] + "..." if len(data.body) > 500 else data.body  # Reduced text
+            words = body_text.split()
             
+            # Create fewer, longer subtitle chunks
+            chunk_size = 20
+            chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+            chunks = chunks[:10]  # Limit to 10 chunks max
+            
+            chunk_duration = audio_duration / len(chunks) if chunks else audio_duration
+            
+            for i, chunk in enumerate(chunks):
+                start_time = i * chunk_duration
+                subtitle = TextClip(
+                    chunk,
+                    fontsize=20,  # Smaller font
+                    color='white',
+                    font='Arial',
+                    stroke_color='black',
+                    stroke_width=1
+                ).set_position(('center', 'bottom')).set_start(start_time).set_duration(chunk_duration)
+                clips.append(subtitle)
+                
         except Exception as e:
-            logger.error(f"Error creating subtitles: {str(e)}")
-            subtitle_clips = []  # Continue without subtitles if they fail
+            logger.warning(f"Skipping subtitles due to error: {str(e)}")
         
-        # Compose final video
+        # Compose video
         logger.info("Composing final video...")
-        try:
-            final_clips = [background_video]
-            if title_clip:
-                final_clips.append(title_clip)
-            final_clips.extend(subtitle_clips)
-            
-            final_video = CompositeVideoClip(final_clips)
-            
-            # Ensure final video has FPS set
-            if not hasattr(final_video, 'fps') or final_video.fps is None:
-                final_video = final_video.set_fps(24)
-            
-            final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
-            
-        except Exception as e:
-            logger.error(f"Error composing video: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to compose video: {str(e)}")
+        final_video = CompositeVideoClip(clips)
+        final_video = final_video.set_fps(24)
+        final_video = final_video.set_audio(audio_clip.subclip(0, audio_duration))
         
-        # Write video file
+        # Write video using robust method
         logger.info(f"Writing video to {output_path}")
-        try:
-            final_video.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile=os.path.join(temp_dir, f"{video_id}_temp_audio.m4a"),
-                remove_temp=True,
-                fps=24,  # Explicitly set FPS
-                preset='medium',
-                verbose=False,
-                logger=None
-            )
-            
-        except Exception as e:
-            logger.error(f"Error writing video: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to write video: {str(e)}")
+        write_success = write_video_robust(final_video, output_path, temp_dir, video_id)
         
         # Close clips to free memory
         try:
-            background_video.close()
-            audio_clip.close()
-            final_video.close()
-            if title_clip:
-                title_clip.close()
-            for clip in subtitle_clips:
+            for clip in clips:
                 clip.close()
+            final_video.close()
+            audio_clip.close()
         except Exception as e:
             logger.warning(f"Error closing clips: {str(e)}")
+        
+        if not write_success:
+            raise HTTPException(status_code=500, detail="Failed to write video with all methods")
         
         # Verify output file was created
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise HTTPException(status_code=500, detail="Video rendering failed - output file is empty")
         
+        logger.info(f"Video successfully created: {os.path.getsize(output_path)} bytes")
+        
         # Upload to Dropbox
         clean_hook = "".join(c for c in data.hook if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        clean_hook = clean_hook[:50]  # Limit length
+        clean_hook = clean_hook[:50]
         dropbox_path = f"/final_videos/{clean_hook}_{video_id}.mp4"
         upload_success = upload_to_dropbox(output_path, dropbox_path)
         
@@ -353,7 +369,6 @@ def render_video(data: RenderRequest):
         # Cleanup temporary files
         if temp_dir and os.path.exists(temp_dir):
             try:
-                import shutil
                 shutil.rmtree(temp_dir)
                 logger.info(f"Cleaned up temp directory: {temp_dir}")
             except Exception as e:
