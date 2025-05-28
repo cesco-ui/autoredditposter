@@ -408,6 +408,7 @@ def render_video(data: RenderRequest):
         
         # Add improved subtitles with perfect audio sync and bubbly styling
         try:
+            logger.info("Starting subtitle generation...")
             body_text = expanded_body[:1000] + "..." if len(expanded_body) > 1000 else expanded_body
             words = body_text.split()
             
@@ -415,6 +416,8 @@ def render_video(data: RenderRequest):
             chunk_size = 2  # Smaller chunks for better audio alignment
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
             chunks = chunks[:30]  # Allow more chunks for better timing precision
+            
+            logger.info(f"Created {len(chunks)} subtitle chunks")
             
             # Perfect timing calculation for audio sync
             # Start subtitles after title has been shown
@@ -425,57 +428,52 @@ def render_video(data: RenderRequest):
             # Position subtitles in lower-middle area for readability
             subtitle_y_position = int(target_height * 0.65)  # 65% down from top
             
+            logger.info(f"Subtitle timing: delay={subtitle_start_delay}s, duration={subtitle_duration}s, chunk_duration={chunk_duration}s")
+            
+            subtitle_clips_added = 0
             for i, chunk in enumerate(chunks):
-                # Perfect timing sync
-                start_time = subtitle_start_delay + (i * chunk_duration)
-                
-                # Create bubbly, easy-to-read subtitle text
-                subtitle_main = TextClip(
-                    chunk,
-                    fontsize=56,  # Even larger for mobile readability
-                    color='white',
-                    font='Arial-Bold',
-                    stroke_color='black',
-                    stroke_width=6,  # Very thick outline for bubbly effect
-                    method='caption',
-                    size=(target_width-40, None),
-                    align='center'
-                )
-                
-                # Add drop shadow for maximum bubbly effect
                 try:
-                    subtitle_shadow = TextClip(
+                    # Perfect timing sync
+                    start_time = subtitle_start_delay + (i * chunk_duration)
+                    
+                    logger.info(f"Processing subtitle {i+1}/{len(chunks)}: '{chunk}'")
+                    
+                    # Create bubbly, easy-to-read subtitle text
+                    subtitle_main = TextClip(
                         chunk,
-                        fontsize=56,
-                        color='rgba(0,0,0,0.7)',  # Darker shadow for subtitles
+                        fontsize=56,  # Even larger for mobile readability
+                        color='white',
                         font='Arial-Bold',
+                        stroke_color='black',
+                        stroke_width=6,  # Very thick outline for bubbly effect
                         method='caption',
                         size=(target_width-40, None),
                         align='center'
                     )
                     
-                    # Composite subtitle with shadow for bubbly effect
-                    shadow_offset = 4
-                    bubbly_subtitle = CompositeVideoClip([
-                        subtitle_shadow.set_position(('center', subtitle_y_position + shadow_offset)),
-                        subtitle_main.set_position(('center', subtitle_y_position))
-                    ]).set_start(start_time).set_duration(chunk_duration * 1.4)  # Slight overlap for smooth reading
+                    logger.info(f"Created main subtitle text for chunk {i+1}")
                     
-                    clips.append(bubbly_subtitle)
-                    
-                except Exception as shadow_error:
-                    # Fallback to simple subtitle if shadow fails
-                    logger.warning(f"Subtitle shadow failed for chunk {i}: {shadow_error}")
+                    # Try simpler approach first - just add the main subtitle without shadow
                     subtitle_final = subtitle_main.set_position(
                         ('center', subtitle_y_position)
                     ).set_start(start_time).set_duration(chunk_duration * 1.4)
+                    
                     clips.append(subtitle_final)
+                    subtitle_clips_added += 1
+                    logger.info(f"Added subtitle {i+1} successfully (simple version)")
+                    
+                except Exception as chunk_error:
+                    logger.error(f"Failed to create subtitle chunk {i+1}: {str(chunk_error)}")
+                    continue
+            
+            logger.info(f"Successfully added {subtitle_clips_added} subtitle clips")
                 
         except Exception as e:
-            logger.warning(f"Skipping subtitles due to error: {str(e)}")
+            logger.error(f"Major subtitle generation error: {str(e)}")
             
             # Fallback to simple subtitles with bubbly styling
             try:
+                logger.info("Attempting fallback subtitle generation...")
                 body_text = expanded_body[:600] + "..." if len(expanded_body) > 600 else expanded_body
                 simple_subtitle = TextClip(
                     body_text,
@@ -489,8 +487,9 @@ def render_video(data: RenderRequest):
                     align='center'
                 ).set_position(('center', int(target_height * 0.65))).set_start(2.0).set_duration(audio_duration - 3)
                 clips.append(simple_subtitle)
+                logger.info("Added fallback subtitle successfully")
             except Exception as e2:
-                logger.warning(f"Even simple subtitles failed: {str(e2)}")
+                logger.error(f"Even simple subtitles failed: {str(e2)}")
         
         # Compose video
         logger.info("Composing final video...")
