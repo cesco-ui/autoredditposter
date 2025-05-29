@@ -466,41 +466,39 @@ def render_video(data: RenderRequest):
             
             logger.info(f"Created {len(chunks)} subtitle chunks")
             
-            # Perfect timing calculation for audio sync
-            # Dynamic subtitle start delay based on audio duration
-            subtitle_start_delay = min(2.0, audio_duration * 0.05)  # 5% of audio or 2s max
-            subtitle_end_buffer = 1.0  # Leave buffer at end
-            subtitle_duration = max(audio_duration - subtitle_start_delay - subtitle_end_buffer, 5)
+            # Simplified timing calculation for NO OVERLAP
+            # Start subtitles after title (3 seconds delay)
+            subtitle_start_delay = 3.0  # Simple fixed delay
+            available_time = max(audio_duration - subtitle_start_delay - 1.0, 10)  # Leave 1s buffer at end
             
-            # Better chunk duration calculation - account for natural speech patterns
-            base_chunk_duration = subtitle_duration / len(chunks) if chunks else audio_duration
-            # Add slight overlap for smoother reading experience
-            chunk_duration = max(base_chunk_duration, 1.5)  # Minimum 1.5s per chunk for readability
+            # Calculate timing to ensure NO OVERLAP between subtitles
+            chunk_duration = available_time / len(chunks) if chunks else 2.0
+            chunk_duration = max(chunk_duration, 2.0)  # Minimum 2 seconds per chunk for readability
             
-            # Position subtitles in lower-middle area for readability
-            subtitle_y_position = int(target_height * 0.65)  # 65% down from top
+            # Position subtitles DEAD CENTER of screen for maximum readability
+            subtitle_y_position = int(target_height * 0.5)  # 50% = dead center
             
-            logger.info(f"Subtitle timing: delay={subtitle_start_delay}s, duration={subtitle_duration}s, chunk_duration={chunk_duration}s")
+            logger.info(f"Subtitle timing: delay={subtitle_start_delay}s, available_time={available_time}s, chunk_duration={chunk_duration}s")
             
             subtitle_clips_added = 0
             for i, chunk in enumerate(chunks):
                 try:
-                    # Perfect timing sync
+                    # Calculate exact start/end times to prevent overlap
                     start_time = subtitle_start_delay + (i * chunk_duration)
+                    end_time = start_time + chunk_duration - 0.1  # Small gap between subtitles
                     
-                    logger.info(f"Processing subtitle {i+1}/{len(chunks)}: '{chunk}'")
+                    logger.info(f"Processing subtitle {i+1}/{len(chunks)}: '{chunk}' (start: {start_time:.1f}s, end: {end_time:.1f}s)")
                     
-                    # Create bubbly, easy-to-read subtitle text with error handling
+                    # Create BIG, BOLD, SIMPLE subtitle text (no stroke/shadow to prevent render failures)
                     try:
                         subtitle_main = TextClip(
                             chunk,
-                            fontsize=56,  # Even larger for mobile readability
+                            fontsize=72,  # Much bigger for mobile readability
                             color='white',
                             font='Arial-Bold',
-                            stroke_color='black',
-                            stroke_width=6,  # Very thick outline for bubbly effect
+                            # Removed stroke_color and stroke_width to prevent render failures
                             method='caption',
-                            size=(target_width-40, None),
+                            size=(target_width-80, None),  # More padding for larger text
                             align='center'
                         )
                         
@@ -509,16 +507,16 @@ def render_video(data: RenderRequest):
                             raise Exception("TextClip creation returned invalid clip")
                             
                     except Exception as font_error:
-                        logger.warning(f"Font rendering failed for chunk {i+1}, trying simpler approach: {font_error}")
-                        # Fallback to simpler text clip
+                        logger.warning(f"Bold font rendering failed for chunk {i+1}, trying simpler approach: {font_error}")
+                        # Fallback to even simpler text clip - NO effects at all
                         try:
                             subtitle_main = TextClip(
                                 chunk,
-                                fontsize=48,
+                                fontsize=64,  # Still large
                                 color='white',
                                 font='Arial',
                                 method='caption',
-                                size=(target_width-60, None),
+                                size=(target_width-100, None),
                                 align='center'
                             )
                             
@@ -532,14 +530,14 @@ def render_video(data: RenderRequest):
                     
                     logger.info(f"Created main subtitle text for chunk {i+1}")
                     
-                    # Position and time the subtitle
+                    # Position DEAD CENTER and set precise timing (no overlap)
                     subtitle_final = subtitle_main.set_position(
                         ('center', subtitle_y_position)
-                    ).set_start(start_time).set_duration(chunk_duration * 1.2)  # Slightly reduced overlap
+                    ).set_start(start_time).set_duration(chunk_duration - 0.1)  # Prevent overlap
                     
                     clips.append(subtitle_final)
                     subtitle_clips_added += 1
-                    logger.info(f"Added subtitle {i+1} successfully")
+                    logger.info(f"Added subtitle {i+1} successfully - no overlap guaranteed")
                     
                 except Exception as chunk_error:
                     logger.error(f"Failed to create subtitle chunk {i+1}: {str(chunk_error)}")
@@ -547,14 +545,15 @@ def render_video(data: RenderRequest):
                     try:
                         simple_chunk = TextClip(
                             chunk,
-                            fontsize=40,
+                            fontsize=60,  # Large fallback size
                             color='white'
+                            # No font effects to prevent failures
                         ).set_position(('center', subtitle_y_position)).set_start(
-                            subtitle_start_delay + (i * chunk_duration)
-                        ).set_duration(chunk_duration)
+                            start_time  # Use calculated start time
+                        ).set_duration(chunk_duration - 0.1)  # Prevent overlap
                         clips.append(simple_chunk)
                         subtitle_clips_added += 1
-                        logger.info(f"Added simple fallback subtitle {i+1}")
+                        logger.info(f"Added simple fallback subtitle {i+1} - no overlap")
                     except:
                         logger.error(f"Even simple fallback failed for chunk {i+1}, skipping")
                         continue
@@ -570,17 +569,16 @@ def render_video(data: RenderRequest):
                 body_text = expanded_body[:600] + "..." if len(expanded_body) > 600 else expanded_body
                 simple_subtitle = TextClip(
                     body_text,
-                    fontsize=50,
+                    fontsize=68,  # Large, consistent with main subtitles
                     color='white',
                     font='Arial-Bold',
-                    stroke_color='black',
-                    stroke_width=5,
+                    # Removed stroke effects to prevent render failures
                     method='caption',
-                    size=(target_width-60, None),
+                    size=(target_width-80, None),
                     align='center'
-                ).set_position(('center', int(target_height * 0.65))).set_start(2.0).set_duration(audio_duration - 3)
+                ).set_position(('center', int(target_height * 0.5))).set_start(3.0).set_duration(audio_duration - 4)  # Center position, consistent timing
                 clips.append(simple_subtitle)
-                logger.info("Added fallback subtitle successfully")
+                logger.info("Added fallback subtitle successfully - centered and large")
             except Exception as e2:
                 logger.error(f"Even simple subtitles failed: {str(e2)}")
         
