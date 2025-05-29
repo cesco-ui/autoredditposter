@@ -141,7 +141,7 @@ def upload_to_dropbox(file_path: str, dropbox_path: str) -> bool:
         logger.info(f"Uploading file: {file_path} (size: {file_size} bytes) to {dropbox_path}")
         
         headers = {
-            'Authorization': f'Bearer {DROPBOX_ACCESS_TOKEN}',
+            'Authorization': f'Bearer {{ $node["Upload Audio to Dropbox"].context.oauth2?.accessToken }}',
             'Dropbox-API-Arg': f'{{"path": "{dropbox_path}", "mode": "add", "autorename": true}}',
             'Content-Type': 'application/octet-stream'
         }
@@ -495,16 +495,12 @@ def render_video(data: RenderRequest):
                             chunk,
                             fontsize=72,  # Much bigger for mobile readability
                             color='white',
-                            font='Arial-Bold',
-                            # Removed stroke_color and stroke_width to prevent render failures
-                            method='caption',
-                            size=(target_width-80, None),  # More padding for larger text
-                            align='center'
+                            method='label'  # Use label instead of caption for better reliability
                         )
                         
                         # Validate the subtitle was created properly
-                        if subtitle_main is None or subtitle_main.duration <= 0:
-                            raise Exception("TextClip creation returned invalid clip")
+                        if subtitle_main is None:
+                            raise Exception("TextClip creation returned None")
                             
                     except Exception as font_error:
                         logger.warning(f"Bold font rendering failed for chunk {i+1}, trying simpler approach: {font_error}")
@@ -514,14 +510,11 @@ def render_video(data: RenderRequest):
                                 chunk,
                                 fontsize=64,  # Still large
                                 color='white',
-                                font='Arial',
-                                method='caption',
-                                size=(target_width-100, None),
-                                align='center'
+                                method='label'  # Simpler method
                             )
                             
                             # Validate fallback clip
-                            if subtitle_main is None or subtitle_main.duration <= 0:
+                            if subtitle_main is None:
                                 raise Exception("Fallback TextClip also failed")
                                 
                         except Exception as fallback_error:
@@ -546,8 +539,8 @@ def render_video(data: RenderRequest):
                         simple_chunk = TextClip(
                             chunk,
                             fontsize=60,  # Large fallback size
-                            color='white'
-                            # No font effects to prevent failures
+                            color='white',
+                            method='label'  # Use simpler method instead of caption
                         ).set_position(('center', subtitle_y_position)).set_start(
                             start_time  # Use calculated start time
                         ).set_duration(chunk_duration - 0.1)  # Prevent overlap
@@ -566,21 +559,19 @@ def render_video(data: RenderRequest):
             # Fallback to simple subtitles with bubbly styling
             try:
                 logger.info("Attempting fallback subtitle generation...")
-                body_text = expanded_body[:600] + "..." if len(expanded_body) > 600 else expanded_body
+                body_text = expanded_body[:200] + "..." if len(expanded_body) > 200 else expanded_body
                 simple_subtitle = TextClip(
                     body_text,
                     fontsize=68,  # Large, consistent with main subtitles
                     color='white',
-                    font='Arial-Bold',
-                    # Removed stroke effects to prevent render failures
-                    method='caption',
-                    size=(target_width-80, None),
-                    align='center'
+                    method='label'  # Use simpler method
                 ).set_position(('center', int(target_height * 0.5))).set_start(3.0).set_duration(audio_duration - 4)  # Center position, consistent timing
                 clips.append(simple_subtitle)
                 logger.info("Added fallback subtitle successfully - centered and large")
             except Exception as e2:
                 logger.error(f"Even simple subtitles failed: {str(e2)}")
+                # If all subtitle attempts fail, continue without subtitles
+                logger.info("Continuing video render without subtitles")
         
         # Compose video
         logger.info("Composing final video...")
