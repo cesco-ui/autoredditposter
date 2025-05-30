@@ -1,8 +1,4 @@
-fastapi==0.100.0
-uvicorn==0.22.0
+Flask==2.3.3
 requests==2.31.0
-moviepy==1.0.3
-imageio==2.31.1
-imageio-ffmpeg==0.4.8
-numpy==1.23.5
-decorator==4.4.2 
+Werkzeug==2.3.7
+gunicorn==21.2.0
