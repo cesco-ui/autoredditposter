@@ -4,14 +4,21 @@ import subprocess
 import requests
 import tempfile
 import uuid
-from werkzeug.utils import secure_filename
-import time
+import shutil
 
 app = Flask(__name__)
 
 # Create output directory
 OUTPUT_DIR = '/tmp/videos'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+def check_ffmpeg():
+    """Check if FFmpeg is available"""
+    try:
+        result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+        return result.returncode == 0
+    except:
+        return False
 
 def download_file(url, filename):
     """Download file from URL"""
@@ -30,8 +37,29 @@ def download_file(url, filename):
 def combine_audio_video(audio_path, video_path, output_path):
     """Combine audio and video using FFmpeg"""
     try:
-        cmd = [
+        # Try different FFmpeg commands
+        ffmpeg_commands = [
             'ffmpeg',
+            '/usr/bin/ffmpeg',
+            '/usr/local/bin/ffmpeg'
+        ]
+        
+        ffmpeg_path = None
+        for cmd in ffmpeg_commands:
+            try:
+                result = subprocess.run([cmd, '-version'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    ffmpeg_path = cmd
+                    break
+            except:
+                continue
+        
+        if not ffmpeg_path:
+            print("FFmpeg not found")
+            return False
+        
+        cmd = [
+            ffmpeg_path,
             '-i', video_path,
             '-i', audio_path,
             '-c:v', 'copy',
@@ -58,11 +86,18 @@ def combine_audio_video(audio_path, video_path, output_path):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "ffmpeg": "available"})
+    ffmpeg_available = check_ffmpeg()
+    return jsonify({
+        "status": "healthy", 
+        "ffmpeg": "available" if ffmpeg_available else "not found"
+    })
 
 @app.route('/combine', methods=['POST'])
 def combine_videos():
     try:
+        if not check_ffmpeg():
+            return jsonify({"error": "FFmpeg not available on this system"}), 500
+        
         data = request.get_json()
         
         if not data or 'audio_url' not in data or 'video_url' not in data:
