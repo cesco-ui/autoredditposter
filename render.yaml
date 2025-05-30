@@ -7,4 +7,4 @@ services:
       apt-get install -y ffmpeg && 
       pip install -r requirements.txt
     startCommand: gunicorn main:app --host 0.0.0.0 --port $PORT
-    plan: free
+    plan: starter
