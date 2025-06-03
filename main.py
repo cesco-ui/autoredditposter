@@ -94,6 +94,7 @@ def health():
 
 @app.route('/combine', methods=['POST'])
 def combine_videos():
+    """Original endpoint - returns binary file"""
     try:
         if not check_ffmpeg():
             return jsonify({"error": "FFmpeg not available on this system"}), 500
@@ -146,6 +147,80 @@ def combine_videos():
     except Exception as e:
         print(f"Error in combine_videos: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/combine-url', methods=['POST'])
+def combine_videos_url():
+    """New endpoint - returns URL instead of binary file"""
+    try:
+        if not check_ffmpeg():
+            return jsonify({"error": "FFmpeg not available on this system"}), 500
+        
+        data = request.get_json()
+        
+        if not data or 'audio_url' not in data or 'video_url' not in data:
+            return jsonify({"error": "Missing audio_url or video_url"}), 400
+        
+        audio_url = data['audio_url']
+        video_url = data['video_url']
+        
+        # Generate unique filename
+        job_id = str(uuid.uuid4())
+        
+        # File paths
+        audio_path = f'/tmp/audio_{job_id}.mp3'
+        video_path = f'/tmp/video_{job_id}.mp4'
+        output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
+        
+        # Download files
+        print(f"Downloading audio from: {audio_url}")
+        if not download_file(audio_url, audio_path):
+            return jsonify({"error": "Failed to download audio"}), 400
+            
+        print(f"Downloading video from: {video_url}")
+        if not download_file(video_url, video_path):
+            return jsonify({"error": "Failed to download video"}), 400
+        
+        # Combine with FFmpeg
+        print(f"Combining audio and video...")
+        if not combine_audio_video(audio_path, video_path, output_path):
+            return jsonify({"error": "Failed to combine audio and video"}), 500
+        
+        # Clean up input files
+        try:
+            os.remove(audio_path)
+            os.remove(video_path)
+        except:
+            pass
+        
+        # Return URL info instead of file
+        download_url = f"{request.host_url}download/{job_id}"
+        file_size = os.path.getsize(output_path)
+        
+        return jsonify({
+            "success": True,
+            "download_url": download_url,
+            "url": download_url,  # For easy access in n8n
+            "job_id": job_id,
+            "file_size": file_size
+        })
+        
+    except Exception as e:
+        print(f"Error in combine_videos_url: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/download/<job_id>', methods=['GET'])
+def download_video(job_id):
+    """Download endpoint for combined videos"""
+    output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
+    
+    if not os.path.exists(output_path):
+        return jsonify({"error": "File not found"}), 404
+    
+    return send_file(
+        output_path,
+        as_attachment=False,  # Stream instead of download
+        mimetype='video/mp4'
+    )
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
