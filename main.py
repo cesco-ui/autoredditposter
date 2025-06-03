@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 import os
 import subprocess
 import requests
@@ -192,8 +192,8 @@ def combine_videos_url():
         except:
             pass
         
-        # Return URL info instead of file
-        download_url = f"{request.host_url}download/{job_id}"
+        # Return URL info instead of file - now with .mp4 extension for Creatomate
+        download_url = f"{request.host_url}download/{job_id}.mp4"
         file_size = os.path.getsize(output_path)
         
         return jsonify({
@@ -210,17 +210,44 @@ def combine_videos_url():
 
 @app.route('/download/<job_id>', methods=['GET'])
 def download_video(job_id):
-    """Download endpoint for combined videos"""
+    """Download endpoint for combined videos - backward compatibility"""
     output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
     
     if not os.path.exists(output_path):
         return jsonify({"error": "File not found"}), 404
     
-    return send_file(
+    response = send_file(
         output_path,
-        as_attachment=False,  # Stream instead of download
+        as_attachment=False,
         mimetype='video/mp4'
     )
+    
+    # Add headers for better video streaming
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['Content-Type'] = 'video/mp4'
+    
+    return response
+
+@app.route('/download/<job_id>.mp4', methods=['GET'])
+def download_video_mp4(job_id):
+    """Download endpoint with .mp4 extension for Creatomate compatibility"""
+    output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
+    
+    if not os.path.exists(output_path):
+        return jsonify({"error": "File not found"}), 404
+    
+    response = send_file(
+        output_path,
+        as_attachment=False,
+        mimetype='video/mp4'
+    )
+    
+    # Add headers for better video streaming and Creatomate compatibility
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['Content-Type'] = 'video/mp4'
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    
+    return response
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
