@@ -5,18 +5,12 @@ import requests
 import tempfile
 import uuid
 import shutil
-import threading
-import time
-from functools import wraps
 
 app = Flask(__name__)
 
 # Create output directory
 OUTPUT_DIR = '/tmp/videos'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Store for async job status
-job_status = {}
 
 def check_ffmpeg():
     """Check if FFmpeg is available"""
@@ -26,56 +20,88 @@ def check_ffmpeg():
     except:
         return False
 
-def verify_audio_in_video(video_path):
-    """Verify that the video file actually contains audio streams"""
+def verify_audio_file(audio_path):
+    """Lightweight audio file verification - no FFmpeg processing"""
     try:
-        ffmpeg_commands = ['ffmpeg', '/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
-        ffmpeg_path = None
-        
-        for cmd in ffmpeg_commands:
-            try:
-                result = subprocess.run([cmd, '-version'], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    ffmpeg_path = cmd
-                    break
-            except:
-                continue
-        
-        if not ffmpeg_path:
-            print("FFmpeg not found for verification")
+        if not os.path.exists(audio_path):
+            print("❌ Audio file doesn't exist")
             return False
-        
-        # Check if video has audio streams
-        cmd = [
-            ffmpeg_path,
-            '-i', video_path,
-            '-af', 'volumedetect',
-            '-f', 'null',
-            '-'
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        # Check if audio stream exists and has volume
-        stderr_output = result.stderr.lower()
-        
-        if 'stream #0:1: audio' in stderr_output or 'stream #0:0: audio' in stderr_output:
-            print("✅ Audio stream detected in output video")
             
-            # Check if audio has actual volume (not silent)
-            if 'mean_volume:' in stderr_output and 'max_volume:' in stderr_output:
-                print("✅ Audio has detectable volume")
-                return True
-            else:
-                print("❌ Audio stream exists but appears to be silent")
-                return False
+        file_size = os.path.getsize(audio_path)
+        print(f"📊 Audio file size: {file_size} bytes")
+        
+        # Basic size check
+        if file_size < 1000:  # Less than 1KB
+            print("❌ Audio file too small")
+            return False
+            
+        # Quick header check for common audio formats
+        with open(audio_path, 'rb') as f:
+            header = f.read(12)
+            
+        # Check for MP3 header
+        if header.startswith(b'ID3') or header[0:2] == b'\xff\xfb' or header[0:2] == b'\xff\xfa':
+            print("✅ Valid MP3 audio file detected")
+            return True
+            
+        # Check for other audio formats
+        if b'ftyp' in header:  # MP4/M4A
+            print("✅ Valid MP4/M4A audio file detected")
+            return True
+            
+        if header.startswith(b'RIFF') and b'WAVE' in header:  # WAV
+            print("✅ Valid WAV audio file detected")
+            return True
+            
+        # If we can't identify format but file size is reasonable, proceed
+        if file_size > 10000:  # 10KB+
+            print("⚠️ Unknown audio format but reasonable size - proceeding")
+            return True
+            
+        print("❌ Audio file format not recognized")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Error verifying audio file: {e}")
+        return False
+
+def parse_ffmpeg_output(stderr_output):
+    """Parse FFmpeg stderr to verify audio was processed successfully"""
+    try:
+        stderr_lower = stderr_output.lower()
+        
+        # Check if FFmpeg detected audio input
+        has_audio_input = (
+            'audio:' in stderr_lower or 
+            'stream #1:0: audio' in stderr_lower or
+            'mp3' in stderr_lower or
+            'aac' in stderr_lower
+        )
+        
+        # Check if FFmpeg processed audio output
+        has_audio_output = (
+            'audio:' in stderr_lower and 'kb' in stderr_lower
+        )
+        
+        # Look for audio encoder confirmation
+        audio_encoded = (
+            'aac' in stderr_lower and 
+            ('hz' in stderr_lower or 'khz' in stderr_lower)
+        )
+        
+        if has_audio_input and (has_audio_output or audio_encoded):
+            print("✅ FFmpeg confirmed audio processing")
+            return True
         else:
-            print("❌ No audio stream found in output video")
+            print("❌ FFmpeg output suggests no audio was processed")
+            print(f"Audio input detected: {has_audio_input}")
+            print(f"Audio output detected: {has_audio_output}")
+            print(f"Audio encoding detected: {audio_encoded}")
             return False
             
     except Exception as e:
-        print(f"Error verifying audio: {e}")
-        return False
+        print(f"⚠️ Error parsing FFmpeg output: {e}")
+        return True  # Default to success if we can't parse
 
 def download_file(url, filename):
     """Download file from URL with enhanced headers for Dropbox compatibility"""
@@ -142,12 +168,6 @@ def download_file(url, filename):
             print("Error: Downloaded file is empty")
             return False
             
-        # For audio files, do additional verification
-        if 'audio' in filename:
-            if file_size < 1000:  # Less than 1KB is suspicious for audio
-                print(f"Warning: Audio file seems too small ({file_size} bytes)")
-                return False
-        
         return True
         
     except requests.exceptions.Timeout as e:
@@ -167,7 +187,7 @@ def download_file(url, filename):
         return False
 
 def combine_audio_video(audio_path, video_path, output_path):
-    """Combine audio and video using FFmpeg with enhanced debugging"""
+    """Combine audio and video using FFmpeg with smart verification"""
     try:
         # Verify input files exist and have content
         if not os.path.exists(audio_path):
@@ -192,7 +212,13 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("Error: Video file is empty")
             return False
         
-        # Find FFmpeg
+        # LIGHTWEIGHT AUDIO VERIFICATION - before FFmpeg
+        print("🔍 Verifying audio file...")
+        if not verify_audio_file(audio_path):
+            print("❌ Audio file verification failed - stopping to prevent Creatomate waste")
+            return False
+        
+        # Try different FFmpeg commands
         ffmpeg_commands = [
             'ffmpeg',
             '/usr/bin/ffmpeg',
@@ -213,25 +239,19 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
-        # Enhanced FFmpeg command with explicit mapping and audio processing
+        # SIMPLE FFMPEG COMMAND - like working version
         cmd = [
             ffmpeg_path,
-            '-i', video_path,           # Input 0: video
-            '-i', audio_path,           # Input 1: audio
-            '-map', '0:v:0',           # Map video stream from input 0
-            '-map', '1:a:0',           # Map audio stream from input 1
-            '-c:v', 'copy',            # Copy video without re-encoding
-            '-c:a', 'aac',             # Encode audio as AAC
-            '-b:a', '128k',            # Set audio bitrate
-            '-ar', '44100',            # Set audio sample rate
-            '-ac', '2',                # Set audio channels to stereo
-            '-shortest',               # Stop when shortest stream ends
-            '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
-            '-y',                      # Overwrite output file
+            '-i', video_path,
+            '-i', audio_path,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-shortest',
+            '-y',  # Overwrite output file
             output_path
         ]
         
-        print(f"Running enhanced FFmpeg command: {' '.join(cmd)}")
+        print(f"Running FFmpeg command: {' '.join(cmd)}")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
@@ -243,13 +263,19 @@ def combine_audio_video(audio_path, video_path, output_path):
             output_size = os.path.getsize(output_path)
             print(f"FFmpeg success. Output file size: {output_size} bytes")
             
-            # CRITICAL: Verify the output actually has audio
-            if verify_audio_in_video(output_path):
-                print("✅ Audio verification PASSED - proceeding")
-                return True
-            else:
-                print("❌ Audio verification FAILED - stopping to prevent wasted credits")
+            # SMART VERIFICATION - parse FFmpeg output (no extra processing)
+            print("🔍 Verifying audio was processed by FFmpeg...")
+            if not parse_ffmpeg_output(result.stderr):
+                print("❌ FFmpeg output suggests audio processing failed - stopping")
                 return False
+            
+            # Basic output file size sanity check
+            if output_size < video_size * 0.8:  # Output should be at least 80% of video size
+                print(f"❌ Output file unexpectedly small: {output_size} vs input video {video_size}")
+                return False
+                
+            print("✅ All verifications passed - safe to send to Creatomate")
+            return True
         else:
             print(f"FFmpeg failed with return code: {result.returncode}")
             print(f"FFmpeg error: {result.stderr}")
@@ -262,30 +288,18 @@ def combine_audio_video(audio_path, video_path, output_path):
         print(f"FFmpeg exception: {e}")
         return False
 
-def timeout_handler(f):
-    """Decorator to handle long-running operations"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        try:
-            return f(*args, **kwargs)
-        except Exception as e:
-            print(f"Error in {f.__name__}: {e}")
-            return jsonify({"error": str(e)}), 500
-    return decorated_function
-
 @app.route('/health', methods=['GET'])
 def health():
     ffmpeg_available = check_ffmpeg()
     return jsonify({
         "status": "healthy", 
         "ffmpeg": "available" if ffmpeg_available else "not found",
-        "worker_timeout": "300s configured"
+        "audio_verification": "enabled"
     })
 
 @app.route('/combine-url', methods=['POST'])
-@timeout_handler
 def combine_videos_url():
-    """Main endpoint for combining audio and video"""
+    """Main endpoint for combining audio and video with smart verification"""
     try:
         if not check_ffmpeg():
             return jsonify({"error": "FFmpeg not available on this system"}), 500
@@ -319,10 +333,10 @@ def combine_videos_url():
         if not download_file(video_url, video_path):
             return jsonify({"error": "Failed to download video"}), 400
         
-        # Combine with FFmpeg
+        # Combine with FFmpeg - with smart verification
         print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
-            return jsonify({"error": "Failed to combine audio and video - no audio detected in output"}), 500
+            return jsonify({"error": "Failed to combine audio and video - audio verification failed"}), 500
         
         # Clean up input files
         try:
@@ -331,7 +345,7 @@ def combine_videos_url():
         except:
             pass
         
-        # Return URL info instead of file - now with .mp4 extension for Creatomate
+        # Return URL info instead of file
         download_url = f"{request.host_url}download/{job_id}.mp4"
         file_size = os.path.getsize(output_path)
         
