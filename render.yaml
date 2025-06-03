@@ -6,5 +6,5 @@ services:
       apt-get update && 
       apt-get install -y ffmpeg && 
       pip install -r requirements.txt
-    startCommand: gunicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: gunicorn --timeout 300 --workers 2 --bind 0.0.0.0:$PORT main:app
     plan: starter
