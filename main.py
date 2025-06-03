@@ -23,15 +23,38 @@ def check_ffmpeg():
 def download_file(url, filename):
     """Download file from URL"""
     try:
-        response = requests.get(url, stream=True, timeout=30)
+        # Add browser-like headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        print(f"Attempting to download: {url}")
+        
+        response = requests.get(url, headers=headers, stream=True, timeout=30, allow_redirects=True)
+        
+        print(f"Response status: {response.status_code}")
+        print(f"Response headers: {dict(response.headers)}")
+        
         response.raise_for_status()
         
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        
+        file_size = os.path.getsize(filename)
+        print(f"Downloaded {file_size} bytes to {filename}")
         return True
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Request error downloading {url}: {e}")
+        return False
     except Exception as e:
-        print(f"Error downloading {url}: {e}")
+        print(f"General error downloading {url}: {e}")
         return False
 
 def combine_audio_video(audio_path, video_path, output_path):
