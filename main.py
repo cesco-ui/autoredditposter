@@ -187,7 +187,7 @@ def download_file(url, filename):
         return False
 
 def combine_audio_video(audio_path, video_path, output_path):
-    """Combine audio and video using FFmpeg with smart verification"""
+    """Combine audio and video using FFmpeg with EXPLICIT STREAM MAPPING"""
     try:
         # Verify input files exist and have content
         if not os.path.exists(audio_path):
@@ -218,7 +218,7 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("❌ Audio file verification failed - stopping to prevent Creatomate waste")
             return False
         
-        # Try different FFmpeg commands
+        # Find FFmpeg
         ffmpeg_commands = [
             'ffmpeg',
             '/usr/bin/ffmpeg',
@@ -239,19 +239,25 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
-        # SIMPLE FFMPEG COMMAND - like working version
+        # EXPLICIT STREAM MAPPING - CRITICAL FOR AUDIO REPLACEMENT
         cmd = [
             ffmpeg_path,
-            '-i', video_path,
-            '-i', audio_path,
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-shortest',
-            '-y',  # Overwrite output file
+            '-i', video_path,           # Input 0: video
+            '-i', audio_path,           # Input 1: audio
+            '-map', '0:v:0',           # Map video stream from input 0
+            '-map', '1:a:0',           # Map audio stream from input 1 (YOUR audio!)
+            '-c:v', 'copy',            # Copy video without re-encoding
+            '-c:a', 'aac',             # Encode audio as AAC
+            '-b:a', '128k',            # Set audio bitrate
+            '-ar', '44100',            # Set audio sample rate
+            '-ac', '2',                # Set audio channels to stereo
+            '-shortest',               # Stop when shortest stream ends
+            '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
+            '-y',                      # Overwrite output file
             output_path
         ]
         
-        print(f"Running FFmpeg command: {' '.join(cmd)}")
+        print(f"Running FFmpeg with explicit stream mapping: {' '.join(cmd)}")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
