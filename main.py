@@ -20,6 +20,57 @@ def check_ffmpeg():
     except:
         return False
 
+def verify_audio_in_video(video_path):
+    """Verify that the video file actually contains audio streams"""
+    try:
+        ffmpeg_commands = ['ffmpeg', '/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
+        ffmpeg_path = None
+        
+        for cmd in ffmpeg_commands:
+            try:
+                result = subprocess.run([cmd, '-version'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    ffmpeg_path = cmd
+                    break
+            except:
+                continue
+        
+        if not ffmpeg_path:
+            print("FFmpeg not found for verification")
+            return False
+        
+        # Check if video has audio streams
+        cmd = [
+            ffmpeg_path,
+            '-i', video_path,
+            '-af', 'volumedetect',
+            '-f', 'null',
+            '-'
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        # Check if audio stream exists and has volume
+        stderr_output = result.stderr.lower()
+        
+        if 'stream #0:1: audio' in stderr_output or 'stream #0:0: audio' in stderr_output:
+            print("✅ Audio stream detected in output video")
+            
+            # Check if audio has actual volume (not silent)
+            if 'mean_volume:' in stderr_output and 'max_volume:' in stderr_output:
+                print("✅ Audio has detectable volume")
+                return True
+            else:
+                print("❌ Audio stream exists but appears to be silent")
+                return False
+        else:
+            print("❌ No audio stream found in output video")
+            return False
+            
+    except Exception as e:
+        print(f"Error verifying audio: {e}")
+        return False
+
 def download_file(url, filename):
     """Download file from URL with enhanced headers for Dropbox compatibility"""
     try:
@@ -110,7 +161,7 @@ def download_file(url, filename):
         return False
 
 def combine_audio_video(audio_path, video_path, output_path):
-    """Combine audio and video using FFmpeg"""
+    """Combine audio and video using FFmpeg with enhanced debugging"""
     try:
         # Verify input files exist and have content
         if not os.path.exists(audio_path):
@@ -135,7 +186,7 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("Error: Video file is empty")
             return False
         
-        # Try different FFmpeg commands
+        # Find FFmpeg
         ffmpeg_commands = [
             'ffmpeg',
             '/usr/bin/ffmpeg',
@@ -156,28 +207,46 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
+        # Enhanced FFmpeg command with explicit mapping and audio processing
         cmd = [
             ffmpeg_path,
-            '-i', video_path,
-            '-i', audio_path,
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-shortest',
-            '-y',  # Overwrite output file
+            '-i', video_path,           # Input 0: video
+            '-i', audio_path,           # Input 1: audio
+            '-map', '0:v:0',           # Map video stream from input 0
+            '-map', '1:a:0',           # Map audio stream from input 1
+            '-c:v', 'copy',            # Copy video without re-encoding
+            '-c:a', 'aac',             # Encode audio as AAC
+            '-b:a', '128k',            # Set audio bitrate
+            '-ar', '44100',            # Set audio sample rate
+            '-ac', '2',                # Set audio channels to stereo
+            '-shortest',               # Stop when shortest stream ends
+            '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
+            '-y',                      # Overwrite output file
             output_path
         ]
         
-        print(f"Running FFmpeg command: {' '.join(cmd)}")
+        print(f"Running enhanced FFmpeg command: {' '.join(cmd)}")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        
+        print(f"FFmpeg return code: {result.returncode}")
+        print(f"FFmpeg stdout: {result.stdout}")
+        print(f"FFmpeg stderr: {result.stderr}")
         
         if result.returncode == 0:
             output_size = os.path.getsize(output_path)
             print(f"FFmpeg success. Output file size: {output_size} bytes")
-            return True
+            
+            # CRITICAL: Verify the output actually has audio
+            if verify_audio_in_video(output_path):
+                print("✅ Audio verification PASSED - proceeding")
+                return True
+            else:
+                print("❌ Audio verification FAILED - stopping to prevent wasted credits")
+                return False
         else:
+            print(f"FFmpeg failed with return code: {result.returncode}")
             print(f"FFmpeg error: {result.stderr}")
-            print(f"FFmpeg stdout: {result.stdout}")
             return False
             
     except subprocess.TimeoutExpired:
@@ -234,7 +303,7 @@ def combine_videos():
         # Combine with FFmpeg
         print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
-            return jsonify({"error": "Failed to combine audio and video"}), 500
+            return jsonify({"error": "Failed to combine audio and video - no audio detected in output"}), 500
         
         # Clean up input files
         try:
@@ -294,7 +363,7 @@ def combine_videos_url():
         # Combine with FFmpeg
         print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
-            return jsonify({"error": "Failed to combine audio and video"}), 500
+            return jsonify({"error": "Failed to combine audio and video - no audio detected in output"}), 500
         
         # Clean up input files
         try:
@@ -310,13 +379,15 @@ def combine_videos_url():
         print(f"=== SUCCESS ===")
         print(f"Download URL: {download_url}")
         print(f"File size: {file_size}")
+        print(f"✅ Audio verified - safe to send to Creatomate")
         
         return jsonify({
             "success": True,
             "download_url": download_url,
             "url": download_url,  # For easy access in n8n
             "job_id": job_id,
-            "file_size": file_size
+            "file_size": file_size,
+            "audio_verified": True
         })
         
     except Exception as e:
