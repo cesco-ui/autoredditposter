@@ -5,12 +5,18 @@ import requests
 import tempfile
 import uuid
 import shutil
+import threading
+import time
+from functools import wraps
 
 app = Flask(__name__)
 
 # Create output directory
 OUTPUT_DIR = '/tmp/videos'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Store for async job status
+job_status = {}
 
 def check_ffmpeg():
     """Check if FFmpeg is available"""
@@ -256,77 +262,30 @@ def combine_audio_video(audio_path, video_path, output_path):
         print(f"FFmpeg exception: {e}")
         return False
 
+def timeout_handler(f):
+    """Decorator to handle long-running operations"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            print(f"Error in {f.__name__}: {e}")
+            return jsonify({"error": str(e)}), 500
+    return decorated_function
+
 @app.route('/health', methods=['GET'])
 def health():
     ffmpeg_available = check_ffmpeg()
     return jsonify({
         "status": "healthy", 
-        "ffmpeg": "available" if ffmpeg_available else "not found"
+        "ffmpeg": "available" if ffmpeg_available else "not found",
+        "worker_timeout": "300s configured"
     })
 
-@app.route('/combine', methods=['POST'])
-def combine_videos():
-    """Original endpoint - returns binary file"""
-    try:
-        if not check_ffmpeg():
-            return jsonify({"error": "FFmpeg not available on this system"}), 500
-        
-        data = request.get_json()
-        
-        if not data or 'audio_url' not in data or 'video_url' not in data:
-            return jsonify({"error": "Missing audio_url or video_url"}), 400
-        
-        audio_url = data['audio_url']
-        video_url = data['video_url']
-        
-        print(f"=== COMBINE REQUEST ===")
-        print(f"Audio URL: {audio_url}")
-        print(f"Video URL: {video_url}")
-        
-        # Generate unique filename
-        job_id = str(uuid.uuid4())
-        
-        # File paths
-        audio_path = f'/tmp/audio_{job_id}.mp3'
-        video_path = f'/tmp/video_{job_id}.mp4'
-        output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
-        
-        # Download files
-        print(f"=== DOWNLOADING AUDIO ===")
-        if not download_file(audio_url, audio_path):
-            return jsonify({"error": "Failed to download audio"}), 400
-            
-        print(f"=== DOWNLOADING VIDEO ===")
-        if not download_file(video_url, video_path):
-            return jsonify({"error": "Failed to download video"}), 400
-        
-        # Combine with FFmpeg
-        print(f"=== COMBINING FILES ===")
-        if not combine_audio_video(audio_path, video_path, output_path):
-            return jsonify({"error": "Failed to combine audio and video - no audio detected in output"}), 500
-        
-        # Clean up input files
-        try:
-            os.remove(audio_path)
-            os.remove(video_path)
-        except:
-            pass
-        
-        # Return the combined video file
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name=f'combined_{job_id}.mp4',
-            mimetype='video/mp4'
-        )
-        
-    except Exception as e:
-        print(f"Error in combine_videos: {e}")
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/combine-url', methods=['POST'])
+@timeout_handler
 def combine_videos_url():
-    """New endpoint - returns URL instead of binary file"""
+    """Main endpoint for combining audio and video"""
     try:
         if not check_ffmpeg():
             return jsonify({"error": "FFmpeg not available on this system"}), 500
