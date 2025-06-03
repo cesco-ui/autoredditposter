@@ -21,35 +21,87 @@ def check_ffmpeg():
         return False
 
 def download_file(url, filename):
-    """Download file from URL"""
+    """Download file from URL with enhanced headers for Dropbox compatibility"""
     try:
-        # Add browser-like headers
+        # Enhanced browser-like headers specifically for Dropbox temporary links
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'DNT': '1'
         }
         
         print(f"Attempting to download: {url}")
+        print(f"Target filename: {filename}")
         
-        response = requests.get(url, headers=headers, stream=True, timeout=30, allow_redirects=True)
+        # Check if it's a Dropbox temporary link
+        is_dropbox_temp = 'dropboxusercontent.com' in url
+        print(f"Dropbox temporary link detected: {is_dropbox_temp}")
+        
+        response = requests.get(
+            url, 
+            headers=headers, 
+            stream=True, 
+            timeout=60,  # Increased timeout for audio files
+            allow_redirects=True,
+            verify=True  # Ensure SSL verification
+        )
         
         print(f"Response status: {response.status_code}")
         print(f"Response headers: {dict(response.headers)}")
+        print(f"Final URL after redirects: {response.url}")
         
         response.raise_for_status()
         
+        # Check content type for audio files
+        content_type = response.headers.get('content-type', '').lower()
+        print(f"Content-Type: {content_type}")
+        
+        if 'audio' in filename and 'audio' not in content_type and 'octet-stream' not in content_type:
+            print(f"Warning: Expected audio content but got {content_type}")
+        
+        # Write file in chunks
+        total_size = 0
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:  # Filter out keep-alive chunks
+                    f.write(chunk)
+                    total_size += len(chunk)
         
         file_size = os.path.getsize(filename)
         print(f"Downloaded {file_size} bytes to {filename}")
+        print(f"Total streamed: {total_size} bytes")
+        
+        # Verify file size
+        if file_size == 0:
+            print("Error: Downloaded file is empty")
+            return False
+            
+        # For audio files, do additional verification
+        if 'audio' in filename:
+            if file_size < 1000:  # Less than 1KB is suspicious for audio
+                print(f"Warning: Audio file seems too small ({file_size} bytes)")
+                return False
+        
         return True
         
+    except requests.exceptions.Timeout as e:
+        print(f"Timeout error downloading {url}: {e}")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        print(f"Connection error downloading {url}: {e}")
+        return False
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error downloading {url}: {e}")
+        return False
     except requests.exceptions.RequestException as e:
         print(f"Request error downloading {url}: {e}")
         return False
@@ -60,6 +112,29 @@ def download_file(url, filename):
 def combine_audio_video(audio_path, video_path, output_path):
     """Combine audio and video using FFmpeg"""
     try:
+        # Verify input files exist and have content
+        if not os.path.exists(audio_path):
+            print(f"Audio file not found: {audio_path}")
+            return False
+            
+        if not os.path.exists(video_path):
+            print(f"Video file not found: {video_path}")
+            return False
+            
+        audio_size = os.path.getsize(audio_path)
+        video_size = os.path.getsize(video_path)
+        
+        print(f"Audio file size: {audio_size} bytes")
+        print(f"Video file size: {video_size} bytes")
+        
+        if audio_size == 0:
+            print("Error: Audio file is empty")
+            return False
+            
+        if video_size == 0:
+            print("Error: Video file is empty")
+            return False
+        
         # Try different FFmpeg commands
         ffmpeg_commands = [
             'ffmpeg',
@@ -92,12 +167,17 @@ def combine_audio_video(audio_path, video_path, output_path):
             output_path
         ]
         
+        print(f"Running FFmpeg command: {' '.join(cmd)}")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if result.returncode == 0:
+            output_size = os.path.getsize(output_path)
+            print(f"FFmpeg success. Output file size: {output_size} bytes")
             return True
         else:
             print(f"FFmpeg error: {result.stderr}")
+            print(f"FFmpeg stdout: {result.stdout}")
             return False
             
     except subprocess.TimeoutExpired:
@@ -130,6 +210,10 @@ def combine_videos():
         audio_url = data['audio_url']
         video_url = data['video_url']
         
+        print(f"=== COMBINE REQUEST ===")
+        print(f"Audio URL: {audio_url}")
+        print(f"Video URL: {video_url}")
+        
         # Generate unique filename
         job_id = str(uuid.uuid4())
         
@@ -139,16 +223,16 @@ def combine_videos():
         output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
         
         # Download files
-        print(f"Downloading audio from: {audio_url}")
+        print(f"=== DOWNLOADING AUDIO ===")
         if not download_file(audio_url, audio_path):
             return jsonify({"error": "Failed to download audio"}), 400
             
-        print(f"Downloading video from: {video_url}")
+        print(f"=== DOWNLOADING VIDEO ===")
         if not download_file(video_url, video_path):
             return jsonify({"error": "Failed to download video"}), 400
         
         # Combine with FFmpeg
-        print(f"Combining audio and video...")
+        print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
             return jsonify({"error": "Failed to combine audio and video"}), 500
         
@@ -186,6 +270,10 @@ def combine_videos_url():
         audio_url = data['audio_url']
         video_url = data['video_url']
         
+        print(f"=== COMBINE-URL REQUEST ===")
+        print(f"Audio URL: {audio_url}")
+        print(f"Video URL: {video_url}")
+        
         # Generate unique filename
         job_id = str(uuid.uuid4())
         
@@ -195,16 +283,16 @@ def combine_videos_url():
         output_path = f'{OUTPUT_DIR}/combined_{job_id}.mp4'
         
         # Download files
-        print(f"Downloading audio from: {audio_url}")
+        print(f"=== DOWNLOADING AUDIO ===")
         if not download_file(audio_url, audio_path):
             return jsonify({"error": "Failed to download audio"}), 400
             
-        print(f"Downloading video from: {video_url}")
+        print(f"=== DOWNLOADING VIDEO ===")
         if not download_file(video_url, video_path):
             return jsonify({"error": "Failed to download video"}), 400
         
         # Combine with FFmpeg
-        print(f"Combining audio and video...")
+        print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
             return jsonify({"error": "Failed to combine audio and video"}), 500
         
@@ -218,6 +306,10 @@ def combine_videos_url():
         # Return URL info instead of file - now with .mp4 extension for Creatomate
         download_url = f"{request.host_url}download/{job_id}.mp4"
         file_size = os.path.getsize(output_path)
+        
+        print(f"=== SUCCESS ===")
+        print(f"Download URL: {download_url}")
+        print(f"File size: {file_size}")
         
         return jsonify({
             "success": True,
