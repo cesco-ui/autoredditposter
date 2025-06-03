@@ -156,16 +156,20 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
+        # UPDATED cmd ARRAY:
         cmd = [
             ffmpeg_path,
             '-i', video_path,
             '-i', audio_path,
+            '-map', '0:v',      # Only take video from input 0 (strips native audio)
+            '-map', '1:a',      # Only take audio from input 1 (your new audio)
             '-c:v', 'copy',
             '-c:a', 'aac',
             '-shortest',
             '-y',  # Overwrite output file
             output_path
         ]
+        
         
         print(f"Running FFmpeg command: {' '.join(cmd)}")
         
