@@ -5,6 +5,7 @@ import requests
 import tempfile
 import uuid
 import shutil
+import platform
 
 app = Flask(__name__)
 
@@ -15,7 +16,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def check_ffmpeg():
     """Check if FFmpeg is available"""
     try:
-        result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+        if platform.system() == "Windows":
+            result = subprocess.run(['where', 'ffmpeg'], capture_output=True, text=True)
+        else:
+            result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
         return result.returncode == 0
     except:
         return False
@@ -110,7 +114,7 @@ def download_file(url, filename):
         return False
 
 def combine_audio_video(audio_path, video_path, output_path):
-    """Combine audio and video using FFmpeg"""
+    """Combine audio and video using FFmpeg with audio speed adjustment (10% faster)"""
     try:
         # Verify input files exist and have content
         if not os.path.exists(audio_path):
@@ -156,7 +160,7 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
-        # UPDATED cmd ARRAY:
+        # Base command array
         cmd = [
             ffmpeg_path,
             '-i', video_path,
@@ -166,10 +170,20 @@ def combine_audio_video(audio_path, video_path, output_path):
             '-c:v', 'copy',
             '-c:a', 'aac',
             '-shortest',
-            '-y',  # Overwrite output file
-            output_path
         ]
-        
+
+        # Always apply atempo filter with speed=1.1 (10% faster)
+        speed = 1.1
+        atempo_filters = []
+        remaining_speed = speed
+        while remaining_speed > 2.0:
+            atempo_filters.append('atempo=2.0')
+            remaining_speed /= 2.0
+        atempo_filters.append(f'atempo={remaining_speed:.3f}')
+        cmd.extend(['-af', ','.join(atempo_filters)])
+
+        # Add output path and overwrite flag
+        cmd.extend(['-y', output_path])
         
         print(f"Running FFmpeg command: {' '.join(cmd)}")
         
@@ -217,6 +231,7 @@ def combine_videos():
         print(f"=== COMBINE REQUEST ===")
         print(f"Audio URL: {audio_url}")
         print(f"Video URL: {video_url}")
+        print(f"Speed: 1.1 (10% faster)")
         
         # Generate unique filename
         job_id = str(uuid.uuid4())
@@ -235,7 +250,7 @@ def combine_videos():
         if not download_file(video_url, video_path):
             return jsonify({"error": "Failed to download video"}), 400
         
-        # Combine with FFmpeg
+        # Combine with FFmpeg (always speed up by 10%)
         print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
             return jsonify({"error": "Failed to combine audio and video"}), 500
@@ -248,12 +263,7 @@ def combine_videos():
             pass
         
         # Return the combined video file
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name=f'combined_{job_id}.mp4',
-            mimetype='video/mp4'
-        )
+        return send_file(output_path, mimetype='video/mp4')
         
     except Exception as e:
         print(f"Error in combine_videos: {e}")
@@ -261,7 +271,7 @@ def combine_videos():
 
 @app.route('/combine-url', methods=['POST'])
 def combine_videos_url():
-    """New endpoint - returns URL instead of binary file"""
+    """Endpoint that returns a URL to download the combined video"""
     try:
         if not check_ffmpeg():
             return jsonify({"error": "FFmpeg not available on this system"}), 500
@@ -277,6 +287,7 @@ def combine_videos_url():
         print(f"=== COMBINE-URL REQUEST ===")
         print(f"Audio URL: {audio_url}")
         print(f"Video URL: {video_url}")
+        print(f"Speed: 1.1 (10% faster)")
         
         # Generate unique filename
         job_id = str(uuid.uuid4())
@@ -295,7 +306,7 @@ def combine_videos_url():
         if not download_file(video_url, video_path):
             return jsonify({"error": "Failed to download video"}), 400
         
-        # Combine with FFmpeg
+        # Combine with FFmpeg (always speed up by 10%)
         print(f"=== COMBINING FILES ===")
         if not combine_audio_video(audio_path, video_path, output_path):
             return jsonify({"error": "Failed to combine audio and video"}), 500
@@ -307,20 +318,11 @@ def combine_videos_url():
         except:
             pass
         
-        # Return URL info instead of file - now with .mp4 extension for Creatomate
-        download_url = f"{request.host_url}download/{job_id}.mp4"
-        file_size = os.path.getsize(output_path)
-        
-        print(f"=== SUCCESS ===")
-        print(f"Download URL: {download_url}")
-        print(f"File size: {file_size}")
-        
+        # Return the download URL
         return jsonify({
-            "success": True,
-            "download_url": download_url,
-            "url": download_url,  # For easy access in n8n
-            "job_id": job_id,
-            "file_size": file_size
+            "status": "success",
+            "download_url": f"/download/{job_id}",
+            "job_id": job_id
         })
         
     except Exception as e:
