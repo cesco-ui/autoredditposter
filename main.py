@@ -109,8 +109,8 @@ def download_file(url, filename):
         print(f"General error downloading {url}: {e}")
         return False
 
-def combine_audio_video(audio_path, video_path, output_path):
-    """Combine audio and video using FFmpeg"""
+def combine_audio_video(audio_path, video_path, output_path, speed=1.07):
+    """Combine audio and video using FFmpeg with audio speed adjustment"""
     try:
         # Verify input files exist and have content
         if not os.path.exists(audio_path):
@@ -156,7 +156,7 @@ def combine_audio_video(audio_path, video_path, output_path):
             print("FFmpeg not found")
             return False
         
-        # UPDATED cmd ARRAY:
+        # Base command array
         cmd = [
             ffmpeg_path,
             '-i', video_path,
@@ -166,10 +166,23 @@ def combine_audio_video(audio_path, video_path, output_path):
             '-c:v', 'copy',
             '-c:a', 'aac',
             '-shortest',
-            '-y',  # Overwrite output file
-            output_path
         ]
+
+        # Always apply atempo filter with the specified speed
+        atempo_filters = []
+        remaining_speed = speed
+        while remaining_speed > 2.0:
+            atempo_filters.append('atempo=2.0')
+            remaining_speed /= 2.0
+        if remaining_speed > 1.0:
+            atempo_filters.append(f'atempo={remaining_speed:.3f}')
+        elif remaining_speed < 1.0:
+            atempo_filters.append(f'atempo={remaining_speed:.3f}')
         
+        cmd.extend(['-af', ','.join(atempo_filters)])
+
+        # Add output path and overwrite flag
+        cmd.extend(['-y', output_path])
         
         print(f"Running FFmpeg command: {' '.join(cmd)}")
         
@@ -213,10 +226,12 @@ def combine_videos():
         
         audio_url = data['audio_url']
         video_url = data['video_url']
+        speed = float(data.get('speed', 1.07))  # Default to 1.07 if not specified
         
         print(f"=== COMBINE REQUEST ===")
         print(f"Audio URL: {audio_url}")
         print(f"Video URL: {video_url}")
+        print(f"Speed: {speed}")
         
         # Generate unique filename
         job_id = str(uuid.uuid4())
@@ -237,7 +252,7 @@ def combine_videos():
         
         # Combine with FFmpeg
         print(f"=== COMBINING FILES ===")
-        if not combine_audio_video(audio_path, video_path, output_path):
+        if not combine_audio_video(audio_path, video_path, output_path, speed):
             return jsonify({"error": "Failed to combine audio and video"}), 500
         
         # Clean up input files
@@ -248,12 +263,7 @@ def combine_videos():
             pass
         
         # Return the combined video file
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name=f'combined_{job_id}.mp4',
-            mimetype='video/mp4'
-        )
+        return send_file(output_path, mimetype='video/mp4')
         
     except Exception as e:
         print(f"Error in combine_videos: {e}")
@@ -261,7 +271,7 @@ def combine_videos():
 
 @app.route('/combine-url', methods=['POST'])
 def combine_videos_url():
-    """New endpoint - returns URL instead of binary file"""
+    """Endpoint that returns a URL to download the combined video"""
     try:
         if not check_ffmpeg():
             return jsonify({"error": "FFmpeg not available on this system"}), 500
@@ -273,10 +283,12 @@ def combine_videos_url():
         
         audio_url = data['audio_url']
         video_url = data['video_url']
+        speed = float(data.get('speed', 1.07))  # Default to 1.07 if not specified
         
         print(f"=== COMBINE-URL REQUEST ===")
         print(f"Audio URL: {audio_url}")
         print(f"Video URL: {video_url}")
+        print(f"Speed: {speed}")
         
         # Generate unique filename
         job_id = str(uuid.uuid4())
@@ -297,7 +309,7 @@ def combine_videos_url():
         
         # Combine with FFmpeg
         print(f"=== COMBINING FILES ===")
-        if not combine_audio_video(audio_path, video_path, output_path):
+        if not combine_audio_video(audio_path, video_path, output_path, speed):
             return jsonify({"error": "Failed to combine audio and video"}), 500
         
         # Clean up input files
@@ -307,20 +319,11 @@ def combine_videos_url():
         except:
             pass
         
-        # Return URL info instead of file - now with .mp4 extension for Creatomate
-        download_url = f"{request.host_url}download/{job_id}.mp4"
-        file_size = os.path.getsize(output_path)
-        
-        print(f"=== SUCCESS ===")
-        print(f"Download URL: {download_url}")
-        print(f"File size: {file_size}")
-        
+        # Return the download URL
         return jsonify({
-            "success": True,
-            "download_url": download_url,
-            "url": download_url,  # For easy access in n8n
-            "job_id": job_id,
-            "file_size": file_size
+            "status": "success",
+            "download_url": f"/download/{job_id}",
+            "job_id": job_id
         })
         
     except Exception as e:
