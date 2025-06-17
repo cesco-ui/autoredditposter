@@ -144,8 +144,7 @@ def combine_audio_video(audio_path, video_path, output_path):
             'ffmpeg',
             '/usr/bin/ffmpeg',
             '/usr/local/bin/ffmpeg'
-        ]
-        
+       ]
         ffmpeg_path = None
         for cmd in ffmpeg_commands:
             try:
@@ -155,33 +154,33 @@ def combine_audio_video(audio_path, video_path, output_path):
                     break
             except:
                 continue
-        
+
         if not ffmpeg_path:
             print("FFmpeg not found")
             return False
-        
-        # Base command array
-cmd = [
-    ffmpeg_path,
-    '-i', video_path,
-    '-i', audio_path,
-    '-map', '0:v',
-    '-map', '1:a',
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-ac', '2',
-    '-ar', '44100',
-    '-shortest',
-    '-af', 'atempo=1.1',
-    '-y',
-    output_path
-]
-        
+
+        # Base command array (INSIDE the try block, properly indented)
+        cmd = [
+            ffmpeg_path,
+            '-i', video_path,
+            '-i', audio_path,
+            '-map', '0:v',
+            '-map', '1:a',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ac', '2',
+            '-ar', '44100',
+            '-shortest',
+            '-af', 'atempo=1.1',
+            '-y',
+            output_path
+        ]
+
         print(f"Running FFmpeg command: {' '.join(cmd)}")
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        
+
         if result.returncode == 0:
             output_size = os.path.getsize(output_path)
             print(f"FFmpeg success. Output file size: {output_size} bytes")
@@ -190,7 +189,7 @@ cmd = [
             print(f"FFmpeg error: {result.stderr}")
             print(f"FFmpeg stdout: {result.stdout}")
             return False
-            
+
     except subprocess.TimeoutExpired:
         print("FFmpeg timeout")
         return False
