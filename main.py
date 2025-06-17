@@ -5,6 +5,7 @@ import requests
 import tempfile
 import uuid
 import shutil
+import platform
 
 app = Flask(__name__)
 
@@ -15,7 +16,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def check_ffmpeg():
     """Check if FFmpeg is available"""
     try:
-        result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+        if platform.system() == "Windows":
+            result = subprocess.run(['where', 'ffmpeg'], capture_output=True, text=True)
+        else:
+            result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
         return result.returncode == 0
     except:
         return False
