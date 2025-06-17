@@ -161,16 +161,22 @@ def combine_audio_video(audio_path, video_path, output_path):
             return False
         
         # Base command array
-        cmd = [
-            ffmpeg_path,
-            '-i', video_path,
-            '-i', audio_path,
-            '-map', '0:v',      # Only take video from input 0 (strips native audio)
-            '-map', '1:a',      # Only take audio from input 1 (your new audio)
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-shortest',
-        ]
+cmd = [
+    ffmpeg_path,
+    '-i', video_path,
+    '-i', audio_path,
+    '-map', '0:v',
+    '-map', '1:a',
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-ac', '2',
+    '-ar', '44100',
+    '-shortest',
+    '-af', 'atempo=1.1',
+    '-y',
+    output_path
+]
 
         # Always apply atempo filter with speed=1.1 (10% faster)
         speed = 1.1
