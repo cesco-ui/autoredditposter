@@ -20,8 +20,12 @@ def check_ffmpeg():
             result = subprocess.run(['where', 'ffmpeg'], capture_output=True, text=True)
         else:
             result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+        print("FFmpeg check output:", result.stdout)  # <-- Add this line
+        print("FFmpeg check error:", result.stderr)    # <-- Add this line
+        print("FFmpeg check return code:", result.returncode)  # <-- Add this line
         return result.returncode == 0
-    except:
+    except Exception as e:
+        print("FFmpeg check exception:", e)  # <-- Add this line
         return False
 
 def download_file(url, filename):
