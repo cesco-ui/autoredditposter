@@ -177,19 +177,6 @@ cmd = [
     '-y',
     output_path
 ]
-
-        # Always apply atempo filter with speed=1.1 (10% faster)
-        speed = 1.1
-        atempo_filters = []
-        remaining_speed = speed
-        while remaining_speed > 2.0:
-            atempo_filters.append('atempo=2.0')
-            remaining_speed /= 2.0
-        atempo_filters.append(f'atempo={remaining_speed:.3f}')
-        cmd.extend(['-af', ','.join(atempo_filters)])
-
-        # Add output path and overwrite flag
-        cmd.extend(['-y', output_path])
         
         print(f"Running FFmpeg command: {' '.join(cmd)}")
         
