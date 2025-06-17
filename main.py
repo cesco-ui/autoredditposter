@@ -1,3 +1,5 @@
+print("=== main.py is running! ===")
+
 from flask import Flask, request, jsonify, send_file, Response
 import os
 import subprocess
@@ -24,6 +26,7 @@ def check_ffmpeg():
 
 print("Testing FFmpeg availability on startup:")
 check_ffmpeg()
+print("=== Finished FFmpeg check ===")
 
 app = Flask(__name__)
 
