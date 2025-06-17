@@ -7,12 +7,6 @@ import uuid
 import shutil
 import platform
 
-app = Flask(__name__)
-
-# Create output directory
-OUTPUT_DIR = '/tmp/videos'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 def check_ffmpeg():
     """Check if FFmpeg is available"""
     try:
@@ -27,6 +21,15 @@ def check_ffmpeg():
     except Exception as e:
         print("FFmpeg check exception:", e)  # <-- Add this line
         return False
+
+print("Testing FFmpeg availability on startup:")
+check_ffmpeg()
+
+app = Flask(__name__)
+
+# Create output directory
+OUTPUT_DIR = '/tmp/videos'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def download_file(url, filename):
     """Download file from URL with enhanced headers for Dropbox compatibility"""
